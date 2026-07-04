@@ -66,6 +66,10 @@ slf4j = "2.0.17"
 sqlite-android = "-SNAPSHOT"
 termux = "0.118.0"
 diffutils = "4.17"
+# WebRTC AAR for P2P transport (§3.3.1).
+# Pin to a specific vendor build before release; the coordinate below is a
+# placeholder that the user must replace with a chosen trusted build.
+webrtcAndroid = "<pinned-build-or-vendor-version>"
 
 [libraries]
 androidx-camera-core = { module = "androidx.camera:camera-core", version.ref = "cameraCore" }
@@ -160,6 +164,9 @@ androidx-profileinstaller = { group = "androidx.profileinstaller", name = "profi
 ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
 ktor-client-okhttp = { module = "io.ktor:ktor-client-okhttp", version.ref = "ktor" }
 ktor-client-content-negotiation = { module = "io.ktor:ktor-client-content-negotiation", version.ref = "ktor" }
+# WebRTC Android AAR (§3.3.1). Replace the module coordinate with the chosen
+# trusted vendor build before release; the version is a placeholder.
+webrtc-android = { module = "<chosen-group>:<chosen-artifact>", version.ref = "webrtcAndroid" }
 ktor-server-default-headers = { module = "io.ktor:ktor-server-default-headers", version.ref = "ktor" }
 ktor-server-caching-headers = { module = "io.ktor:ktor-server-caching-headers", version.ref = "ktor" }
 ktor-server-conditional-headers = { module = "io.ktor:ktor-server-conditional-headers", version.ref = "ktor" }

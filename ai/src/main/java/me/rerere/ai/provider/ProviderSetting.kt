@@ -237,12 +237,57 @@ sealed class ProviderSetting {
         }
     }
 
+    @Serializable
+    @SerialName("saker_p2p")
+    data class SakerP2P(
+        override var id: Uuid = Uuid.random(),
+        override var enabled: Boolean = true,
+        override var name: String = "Saker P2P",
+        override var models: List<Model> = emptyList(),
+        override val balanceOption: BalanceOption = BalanceOption(),
+        @Transient override val builtIn: Boolean = false,
+        @Transient override val description: @Composable (() -> Unit) = {},
+        @Transient override val shortDescription: @Composable (() -> Unit) = {},
+        var hubUrl: String = "",
+        var authToken: String = "",
+        var targetPeerId: String = "",
+        var clientId: String = "",
+    ) : ProviderSetting() {
+        override fun addModel(model: Model): ProviderSetting = copy(models = models + model)
+        override fun editModel(model: Model): ProviderSetting = copy(models = models.map { if (it.id == model.id) model.copy() else it })
+        override fun delModel(model: Model): ProviderSetting = copy(models = models.filter { it.id != model.id })
+        override fun moveMove(from: Int, to: Int): ProviderSetting = copy(models = models.toMutableList().apply {
+            val model = removeAt(from)
+            add(to, model)
+        })
+        override fun copyProvider(
+            id: Uuid,
+            enabled: Boolean,
+            name: String,
+            models: List<Model>,
+            balanceOption: BalanceOption,
+            builtIn: Boolean,
+            description: @Composable (() -> Unit),
+            shortDescription: @Composable (() -> Unit),
+        ): ProviderSetting = this.copy(
+            id = id,
+            enabled = enabled,
+            name = name,
+            models = models,
+            balanceOption = balanceOption,
+            builtIn = builtIn,
+            description = description,
+            shortDescription = shortDescription,
+        )
+    }
+
     companion object {
         val Types by lazy {
             listOf(
                 OpenAI::class,
                 Google::class,
                 Claude::class,
+                SakerP2P::class,
             )
         }
     }

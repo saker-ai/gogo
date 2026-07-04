@@ -153,6 +153,10 @@ dependencies {
     implementation(libs.termux.terminal.view)
     implementation(libs.guava.listenablefuture)
 
+    // WebRTC (§3.3.1) — placeholder coordinate; pin to a trusted vendor build
+    // before release.
+    implementation(libs.webrtc.android)
+
     // Compose
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
