@@ -4,9 +4,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -23,6 +23,12 @@ class DataChannelTransport(
 ) {
     // request_id → accumulated base64 data for chunked frames (§4.3)
     private val chunkBuffers = ConcurrentHashMap<String, StringBuilder>()
+
+    // Used to break out of collect on normal stream termination. crossinline
+    // lambdas cannot use non-local return, but they can throw.
+    private class StreamDone : RuntimeException() {
+        override fun fillInStackTrace(): Throwable = this
+    }
 
     /**
      * Send an AG-UI run request and stream back SSE event payloads.
@@ -50,33 +56,48 @@ class DataChannelTransport(
         val data = (json.encodeToString(JsonObject.serializer(), request) + "\n").toByteArray()
         client.send(data)
 
-        client.incoming.collect { frame ->
-            when (frame.type) {
-                "data" -> {
-                    emit(frame.payload ?: "")
-                }
-                "chunk" -> {
-                    // Reassemble chunked frames (§4.3)
-                    val reqId = frame.requestId ?: return@collect
-                    val buf = chunkBuffers.computeIfAbsent(reqId) { StringBuilder() }
-                    // Chunk frames carry base64 in the payload of the outer frame;
-                    // decoded here when a chunk envelope arrives.
-                    // Note: chunk reassembly decodes base64 → original NDJSON line.
-                    // The wire format puts chunk metadata in a ChunkFrame; here we
-                    // treat the AGUIFrame.payload as the raw chunk payload slice.
-                    buf.append(frame.payload ?: "")
-                    // We rely on the fin flag — but AGUIFrame doesn't carry it
-                    // directly; chunk frames are decoded at the JSON level.
-                }
-                "done" -> {
-                    chunkBuffers.remove(requestId)
-                    return@collect
-                }
-                "error" -> {
-                    chunkBuffers.remove(requestId)
-                    throw P2PException(frame.code ?: 500, frame.message ?: "unknown error")
+        try {
+            client.incoming.collect { frame ->
+                // Route by request_id; skip auth/connection-level frames.
+                val frameReqId = frame.requestId
+                if (frameReqId != null && frameReqId != requestId) return@collect
+
+                when (frame.type) {
+                    "data" -> {
+                        emit(frame.payload ?: "")
+                    }
+                    "chunk" -> {
+                        val reqId = frame.requestId ?: return@collect
+                        val payloadStr = frame.payload ?: return@collect
+                        val chunk = try {
+                            json.decodeFromString(ChunkFrame.serializer(), payloadStr)
+                        } catch (e: Exception) {
+                            return@collect
+                        }
+                        val buf = chunkBuffers.computeIfAbsent(reqId) { StringBuilder() }
+                        buf.append(chunk.data)
+                        if (chunk.fin) {
+                            chunkBuffers.remove(reqId)
+                            val decoded = try {
+                                Base64.getDecoder().decode(buf.toString()).toString(Charsets.UTF_8)
+                            } catch (e: Exception) {
+                                return@collect
+                            }
+                            emit(decoded)
+                        }
+                    }
+                    "done" -> {
+                        chunkBuffers.remove(requestId)
+                        throw StreamDone()
+                    }
+                    "error" -> {
+                        chunkBuffers.remove(requestId)
+                        throw P2PException(frame.code ?: 500, frame.message ?: "unknown error")
+                    }
                 }
             }
+        } catch (e: StreamDone) {
+            // Normal stream termination; flow completes.
         }
     }
 }

@@ -1,36 +1,39 @@
 package me.rerere.rikkahub.data.p2p
 
-import io.ktor.client.HttpClient
-import io.ktor.client.call.body
-import io.ktor.client.request.get
-import io.ktor.client.request.header
-import io.ktor.client.request.post
-import io.ktor.client.request.setBody
-import io.ktor.client.statement.HttpResponse
-import io.ktor.client.statement.readRawCookies
-import io.ktor.http.ContentType
-import io.ktor.http.HttpHeaders
-import io.ktor.http.contentType
-import io.ktor.http.withCharset
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import me.rerere.common.http.await
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okhttp3.sse.EventSource
+import okhttp3.sse.EventSourceListener
+import okhttp3.sse.EventSources
 import org.webrtc.IceCandidate
 import org.webrtc.SessionDescription
+import java.time.Instant
+import java.time.format.DateTimeParseException
 
 /**
- * HTTP+ SSE implementation of [SignalingClient] (§4.2).
+ * HTTP + SSE implementation of [SignalingClient] (§4.2 of the design doc).
  *
- * Uses Ktor's [HttpClient] for both REST calls and the SSE events stream.
- * JWT is cached in-memory and refreshed before [AuthTokenResponse.refreshAfter].
+ * Uses OkHttp for both REST calls and the SSE events stream, consistent with
+ * the rest of the gogo codebase. JWT is cached in-memory and refreshed before
+ * [AuthTokenResponse.refreshAfter].
  */
 class HttpSignalingClient(
-    private val client: HttpClient,
+    private val client: OkHttpClient,
     private val json: Json = Json { ignoreUnknownKeys = true },
     private var hubBaseUrl: String,
     private var rootToken: String,
@@ -39,12 +42,15 @@ class HttpSignalingClient(
 
     @Volatile private var cachedToken: AuthTokenResponse? = null
 
+    private fun jsonBody(content: String) = content.toRequestBody("application/json".toMediaType())
+
     private suspend fun ensureValidJwt(): String {
         val cached = cachedToken
         if (cached != null) {
             // Refresh 10 minutes before expiry (§7.2.2).
             val refreshAt = parseIso8601(cached.refreshAfter)
-            if (refreshAt == null || refreshAt.time > System.currentTimeMillis() - 60_000) {
+            val now = System.currentTimeMillis()
+            if (refreshAt == null || refreshAt > now - 60_000) {
                 return cached.jwt
             }
         }
@@ -52,20 +58,22 @@ class HttpSignalingClient(
         return cachedToken!!.jwt
     }
 
-    override suspend fun exchangeToken(rootToken: String, clientId: String): AuthTokenResponse {
-        val body = buildJsonObject {
-            put("root_token", rootToken)
-            put("client_id", clientId)
+    override suspend fun exchangeToken(rootToken: String, clientId: String): AuthTokenResponse =
+        withContext(Dispatchers.IO) {
+            val body = buildJsonObject {
+                put("root_token", rootToken)
+                put("client_id", clientId)
+            }
+            val req = Request.Builder()
+                .url("$hubBaseUrl/api/v1/auth/token")
+                .post(jsonBody(json.encodeToString(JsonObject.serializer(), body)))
+                .build()
+            val resp = client.newCall(req).await()
+            if (!resp.isSuccessful) {
+                error("auth/token failed: ${resp.code}")
+            }
+            json.decodeFromString(AuthTokenResponse.serializer(), resp.body!!.string())
         }
-        val resp: HttpResponse = client.post("$hubBaseUrl/api/v1/auth/token") {
-            contentType(ContentType.Application.Json)
-            setBody(json.encodeToString(JsonObject.serializer(), body))
-        }
-        if (resp.status.value != 200) {
-            error("auth/token failed: ${resp.status}")
-        }
-        return json.decodeFromString(AuthTokenResponse.serializer(), resp.body())
-    }
 
     override suspend fun refreshJwt(): AuthTokenResponse {
         cachedToken = exchangeToken(rootToken, clientId)
@@ -76,93 +84,117 @@ class HttpSignalingClient(
         targetPeerId: String,
         clientId: String,
         sdp: SessionDescription,
-    ): SignalResponse {
+    ): SignalResponse = withContext(Dispatchers.IO) {
         val jwt = ensureValidJwt()
         val body = buildJsonObject {
             put("target_peer", targetPeerId)
             put("client_id", clientId)
             put("sdp", buildJsonObject {
-                put("type", sdp.type.canonicalForm().lowercase())
+                put("type", sdp.type.name.lowercase())
                 put("sdp", sdp.description)
             })
         }
-        val resp: HttpResponse = client.post("$hubBaseUrl/api/v1/signal/offer") {
-            header(HttpHeaders.Authorization, "Bearer $jwt")
-            contentType(ContentType.Application.Json)
-            setBody(json.encodeToString(JsonObject.serializer(), body))
+        val req = Request.Builder()
+            .url("$hubBaseUrl/api/v1/signal/offer")
+            .header("Authorization", "Bearer $jwt")
+            .post(jsonBody(json.encodeToString(JsonObject.serializer(), body)))
+            .build()
+        val resp = client.newCall(req).await()
+        if (!resp.isSuccessful) {
+            error("signal/offer failed: ${resp.code}")
         }
-        if (resp.status.value != 200) {
-            error("signal/offer failed: ${resp.status}")
-        }
-        return json.decodeFromString(SignalResponse.serializer(), resp.body())
+        json.decodeFromString(SignalResponse.serializer(), resp.body!!.string())
     }
 
-    override suspend fun sendIceCandidate(sessionId: String, candidate: IceCandidate) {
-        val jwt = ensureValidJwt()
-        val body = buildJsonObject {
-            put("session_id", sessionId)
-            put("candidate", buildJsonObject {
-                put("candidate", candidate.sdp)
-                put("sdpMid", candidate.sdpMid ?: "0")
-                put("sdpMLineIndex", candidate.sdpMLineIndex)
-            })
+    override suspend fun sendIceCandidate(sessionId: String, candidate: IceCandidate) =
+        withContext(Dispatchers.IO) {
+            val jwt = ensureValidJwt()
+            val body = buildJsonObject {
+                put("session_id", sessionId)
+                put("candidate", buildJsonObject {
+                    put("candidate", candidate.sdp)
+                    put("sdpMid", candidate.sdpMid ?: "0")
+                    put("sdpMLineIndex", candidate.sdpMLineIndex)
+                })
+            }
+            val req = Request.Builder()
+                .url("$hubBaseUrl/api/v1/signal/ice")
+                .header("Authorization", "Bearer $jwt")
+                .post(jsonBody(json.encodeToString(JsonObject.serializer(), body)))
+                .build()
+            val resp = client.newCall(req).await()
+            if (resp.code != 204) {
+                error("signal/ice failed: ${resp.code}")
+            }
         }
-        val resp: HttpResponse = client.post("$hubBaseUrl/api/v1/signal/ice") {
-            header(HttpHeaders.Authorization, "Bearer $jwt")
-            contentType(ContentType.Application.Json)
-            setBody(json.encodeToString(JsonObject.serializer(), body))
-        }
-        if (resp.status.value != 204) {
-            error("signal/ice failed: ${resp.status}")
-        }
-    }
 
-    override fun events(sessionId: String): Flow<SignalEvent> = flow {
+    override fun events(sessionId: String): Flow<SignalEvent> = callbackFlow {
         val jwt = ensureValidJwt()
         val url = "$hubBaseUrl/api/v1/signal/events?session_id=$sessionId"
-        // SSE is a long-lived text/event-stream; we read line-by-line.
-        // Ktor's HttpClient supports this via the raw socket; here we use a
-        // simple line-reader over the response body.
-        kotlinx.coroutines.coroutineScope {
-            val resp = client.get(url) {
-                header(HttpHeaders.Authorization, "Bearer $jwt")
-                header(HttpHeaders.Accept, "text/event-stream")
+        val req = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer $jwt")
+            .header("Accept", "text/event-stream")
+            .build()
+
+        val factory = EventSources.createFactory(client)
+        val source = factory.newEventSource(req, object : EventSourceListener() {
+            private var currentEvent: String? = null
+
+            override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                when (type) {
+                    "ice" -> {
+                        val element = try {
+                            json.parseToJsonElement(data)
+                        } catch (e: Exception) {
+                            return
+                        }
+                        trySend(SignalEvent.Ice(element))
+                    }
+                    "connected" -> trySend(SignalEvent.Connected(sessionId))
+                    "failed" -> trySend(SignalEvent.Failed(sessionId, data))
+                }
             }
-            val body: ByteReadChannel = resp.body()
-            val reader = io.ktor.utils.io.ByteReadChannel(body)
-            val lines = io.ktor.utils.io.readLines(reader)
-            for (line in lines) {
-                val ev = parseSseLine(line) ?: continue
-                emit(ev)
+
+            override fun onClosed(eventSource: EventSource) {
+                channel.close()
             }
-        }
+
+            override fun onFailure(eventSource: EventSource, t: Throwable, response: Response?) {
+                channel.close(t)
+            }
+        })
+        awaitClose { source.cancel() }
     }
 
-    override suspend fun listPeers(): List<PeerInfo> {
+    override suspend fun listPeers(): List<PeerInfo> = withContext(Dispatchers.IO) {
         val jwt = ensureValidJwt()
-        val resp: HttpResponse = client.get("$hubBaseUrl/api/v1/signal/peers") {
-            header(HttpHeaders.Authorization, "Bearer $jwt")
+        val req = Request.Builder()
+            .url("$hubBaseUrl/api/v1/signal/peers")
+            .header("Authorization", "Bearer $jwt")
+            .get()
+            .build()
+        val resp = client.newCall(req).await()
+        if (!resp.isSuccessful) {
+            error("signal/peers failed: ${resp.code}")
         }
-        if (resp.status.value != 200) {
-            error("signal/peers failed: ${resp.status}")
-        }
-        val element = json.decodeFromString(JsonElement.serializer(), resp.body())
-        val arr = (element as? JsonObject)?.get("peers") ?: return emptyList()
-        return json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(PeerInfo.serializer()), arr.toString())
+        val body = resp.body!!.string()
+        val element = json.parseToJsonElement(body)
+        val arr = (element as? JsonObject)?.get("peers") ?: return@withContext emptyList()
+        json.decodeFromString(
+            kotlinx.serialization.builtins.ListSerializer(PeerInfo.serializer()),
+            arr.toString()
+        )
     }
 
-    private fun parseSseLine(line: String): SignalEvent? {
-        if (line.startsWith("event: ice")) return null // data follows on next line
-        if (line.startsWith("data: ")) {
-            val data = line.removePrefix("data: ").trim()
-            return SignalEvent.Ice(json.parseToJsonElement(data))
+    private fun parseIso8601(s: String): Long? = try {
+        // Accept both Instant format (with 'Z') and offset formats.
+        Instant.parse(s).toEpochMilli()
+    } catch (e: DateTimeParseException) {
+        try {
+            java.time.OffsetDateTime.parse(s).toInstant().toEpochMilli()
+        } catch (e2: DateTimeParseException) {
+            null
         }
-        return null
-    }
-
-    private fun parseIso8601(s: String): java.util.Date? = try {
-        javax.xml.bind.DatatypeConverter.parseDateTime(s).time
-    } catch (e: Exception) {
-        null
     }
 }

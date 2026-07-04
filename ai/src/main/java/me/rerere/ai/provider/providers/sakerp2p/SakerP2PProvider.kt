@@ -137,11 +137,14 @@ class SakerP2PProvider(
     private suspend fun ensureConnected(setting: ProviderSetting.SakerP2P) {
         if (webrtcClient != null && connectedSetting?.id == setting.id) return
 
+        // Resolve clientId once so signaling and WebRTC see the same value.
+        val clientId = setting.clientId.ifEmpty { "gogo-${UUID.randomUUID().toString().take(8)}" }
+
         val signaling = HttpSignalingClient(
-            client = io.ktor.client.HttpClient(),
+            client = this.client,
             hubBaseUrl = setting.hubUrl,
             rootToken = setting.authToken,
-            clientId = setting.clientId.ifEmpty { "gogo-${UUID.randomUUID().toString().take(8)}" },
+            clientId = clientId,
         )
         signalingClient = signaling
 
@@ -157,7 +160,7 @@ class SakerP2PProvider(
 
         // Exchange root token for JWT before connecting.
         val token = signaling.refreshJwt()
-        webrtc.connect(setting.targetPeerId, iceServers, token.jwt)
+        webrtc.connect(setting.targetPeerId, clientId, iceServers, token.jwt)
         connectedSetting = setting
     }
 

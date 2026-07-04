@@ -54,6 +54,7 @@ class WebRTCClient(
     private var dataChannel: DataChannel? = null
     private var sessionId: String? = null
     private var jwt: String? = null
+    private var clientId: String = ""
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -83,12 +84,14 @@ class WebRTCClient(
 
     suspend fun connect(
         targetPeerId: String,
+        clientId: String,
         iceServers: List<PeerConnection.IceServer>,
         jwt: String,
     ) {
         retryPolicy.retry { attempt ->
             _state.value = P2PConnectionState.Connecting
             this.jwt = jwt
+            this.clientId = clientId
 
             val config = PeerConnection.RTCConfiguration(iceServers).apply {
                 sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
@@ -136,7 +139,7 @@ class WebRTCClient(
             peerConnection!!.awaitSetLocalDescription(offer)
 
             // Send Offer → Hub → Saker, receive Answer
-            val response = signalingClient.sendOffer(targetPeerId, jwt, offer)
+            val response = signalingClient.sendOffer(targetPeerId, clientId, offer)
             sessionId = response.sessionId
             peerConnection!!.awaitSetRemoteDescription(response.sdp.toWebrtc())
 
@@ -220,53 +223,52 @@ class WebRTCClient(
         peerConnection = null
         sessionId = null
         jwt = null
+        clientId = ""
         _state.value = P2PConnectionState.Disconnected
     }
 }
 
 // ——— pion/webrtc-style await helpers for the official org.webrtc API ———
 
+private val sdpDispatcher = kotlinx.coroutines.Dispatchers.IO
+
 suspend fun PeerConnection.awaitCreateOffer(factory: PeerConnectionFactory): SessionDescription {
     val constraints = MediaConstraints().apply {
         mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "false"))
         mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "false"))
     }
-    var result: SessionDescription? = null
-    var error: Throwable? = null
+    val deferred = kotlinx.coroutines.CompletableDeferred<SessionDescription>()
     createOffer(object : SdpObserver {
-        override fun onCreateSuccess(p0: SessionDescription?) { result = p0 }
-        override fun onCreateFailure(p0: String?) { error = RuntimeException(p0) }
+        override fun onCreateSuccess(p0: SessionDescription?) {
+            if (p0 != null) deferred.complete(p0) else deferred.completeExceptionally(RuntimeException("null offer"))
+        }
+        override fun onCreateFailure(p0: String?) { deferred.completeExceptionally(RuntimeException(p0)) }
         override fun onSetSuccess() = Unit
         override fun onSetFailure(p0: String?) = Unit
     }, constraints)
-    // The org.webrtc API is callback-based; we don't have a CompletableDeferred
-    // here without pulling kotlinx-coroutines-jdk8, so we poll briefly.
-    var tries = 0
-    while (result == null && error == null && tries < 1000) {
-        kotlinx.coroutines.delay(10)
-        tries++
-    }
-    return result ?: throw (error ?: RuntimeException("createOffer timeout"))
+    return deferred.await()
 }
 
 suspend fun PeerConnection.awaitSetLocalDescription(sdp: SessionDescription) {
+    val deferred = kotlinx.coroutines.CompletableDeferred<Unit>()
     setLocalDescription(object : SdpObserver {
         override fun onCreateSuccess(p0: SessionDescription?) = Unit
         override fun onCreateFailure(p0: String?) = Unit
-        override fun onSetSuccess() = Unit
-        override fun onSetFailure(p0: String?) = Unit
+        override fun onSetSuccess() { deferred.complete(Unit) }
+        override fun onSetFailure(p0: String?) { deferred.completeExceptionally(RuntimeException(p0)) }
     }, sdp)
-    kotlinx.coroutines.delay(50)
+    deferred.await()
 }
 
 suspend fun PeerConnection.awaitSetRemoteDescription(sdp: SessionDescription) {
+    val deferred = kotlinx.coroutines.CompletableDeferred<Unit>()
     setRemoteDescription(object : SdpObserver {
         override fun onCreateSuccess(p0: SessionDescription?) = Unit
         override fun onCreateFailure(p0: String?) = Unit
-        override fun onSetSuccess() = Unit
-        override fun onSetFailure(p0: String?) = Unit
+        override fun onSetSuccess() { deferred.complete(Unit) }
+        override fun onSetFailure(p0: String?) { deferred.completeExceptionally(RuntimeException(p0)) }
     }, sdp)
-    kotlinx.coroutines.delay(50)
+    deferred.await()
 }
 
 fun SessionDescriptionSDP.toWebrtc(): SessionDescription {
