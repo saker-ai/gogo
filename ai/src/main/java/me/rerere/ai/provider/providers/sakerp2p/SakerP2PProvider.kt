@@ -141,7 +141,14 @@ class SakerP2PProvider(
 
         return try {
             ensureConnected(providerSetting)
-            val signaling = signalingClient ?: return providerSetting.models
+            val signaling = signalingClient
+            if (signaling == null) {
+                // ensureConnected succeeded but signalingClient is null — only
+                // possible if close() ran concurrently between the two reads.
+                // Don't silently fall back; log so the operator notices.
+                Log.w(TAG, "listModels: signalingClient null after ensureConnected for $cacheKey (closed concurrently?)")
+                return providerSetting.models
+            }
             val peers = signaling.listPeers()
             val targetPeer = peers.firstOrNull { it.peerId == providerSetting.targetPeerId }
             val peerModels = targetPeer?.models
