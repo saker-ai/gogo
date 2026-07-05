@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -73,6 +74,10 @@ class SakerP2PProvider(
     private val json = Json { ignoreUnknownKeys = true }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val transportMutex = Mutex()
+    // Serializes connection lifecycle (ensureConnected / disconnect) so that
+    // a concurrent disconnect can't tear down a half-built connection, and
+    // two ensureConnected calls can't race to build duplicate WebRTC clients.
+    private val connectionMutex = Mutex()
 
     @Volatile private var webrtcClient: WebRTCClient? = null
     @Volatile private var transport: DataChannelTransport? = null
@@ -121,6 +126,10 @@ class SakerP2PProvider(
         private const val STREAM_TIMEOUT_MS = 120_000L
         private const val MODELS_CACHE_TTL_MS = 60_000L
         private const val RECONNECT_COOLDOWN_MS = 3_000L
+        // Ceiling for the entire connect handshake (token exchange + offer/answer
+        // + ICE gathering). If this slips past, abort so the caller doesn't
+        // hang indefinitely and the connectionMutex is released.
+        private const val CONNECT_TIMEOUT_MS = 30_000L
     }
 
     override suspend fun listModels(providerSetting: ProviderSetting.SakerP2P): List<Model> {
@@ -329,21 +338,11 @@ class SakerP2PProvider(
     private suspend fun ensureConnected(setting: ProviderSetting.SakerP2P) {
         val settingKey = setting.id.toString()
 
-        // Reconnect cooldown: if the last attempt for THIS setting Failed
-        // recently, wait out the cooldown before re-attempting. Keyed by
-        // setting.id so failure on peer A doesn't delay peer B.
-        val nowMs = System.currentTimeMillis()
-        val lastFail = lastFailedAtBySetting[settingKey] ?: 0L
-        val sinceFail = nowMs - lastFail
-        if (lastFail > 0L && sinceFail < RECONNECT_COOLDOWN_MS) {
-            val wait = RECONNECT_COOLDOWN_MS - sinceFail
-            Log.i(TAG, "Reconnect cooldown active for $settingKey, waiting ${wait}ms")
-            kotlinx.coroutines.delay(wait)
-        }
-
+        // Fast path: re-usable connection with matching fields — skip the
+        // mutex entirely so a steady-state streamText call doesn't block on
+        // an unrelated disconnect.
         val current = webrtcClient
         val currentSetting = connectedSetting
-
         if (current != null && currentSetting != null &&
             currentSetting.id == setting.id &&
             currentSetting.hubUrl == setting.hubUrl &&
@@ -354,99 +353,139 @@ class SakerP2PProvider(
             return
         }
 
-        if (current != null) {
-            disconnect()
-        }
+        // Slow path: serialize against disconnect/other ensureConnected calls
+        // so the connect handshake can't race a teardown. withTimeout caps the
+        // handshake so a stuck peer releases the mutex.
+        withTimeout(CONNECT_TIMEOUT_MS) {
+            connectionMutex.withLock {
+                // Re-check after acquiring the lock: another coroutine may
+                // have already established the connection we wanted.
+                val recheck = webrtcClient
+                val recheckSetting = connectedSetting
+                if (recheck != null && recheckSetting != null &&
+                    recheckSetting.id == setting.id &&
+                    recheckSetting.hubUrl == setting.hubUrl &&
+                    recheckSetting.authToken == setting.authToken &&
+                    recheckSetting.targetPeerId == setting.targetPeerId &&
+                    recheck.state.value is P2PConnectionState.Connected
+                ) {
+                    return@withLock
+                }
 
-        val clientId = setting.clientId.ifEmpty { "gogo-${UUID.randomUUID().toString().take(8)}" }
+                // Reconnect cooldown: if the last attempt for THIS setting
+                // Failed recently, wait out the cooldown. Keyed by setting.id
+                // so failure on peer A doesn't delay peer B.
+                val nowMs = System.currentTimeMillis()
+                val lastFail = lastFailedAtBySetting[settingKey] ?: 0L
+                val sinceFail = nowMs - lastFail
+                if (lastFail > 0L && sinceFail < RECONNECT_COOLDOWN_MS) {
+                    val wait = RECONNECT_COOLDOWN_MS - sinceFail
+                    Log.i(TAG, "Reconnect cooldown active for $settingKey, waiting ${wait}ms")
+                    kotlinx.coroutines.delay(wait)
+                }
 
-        val signaling = HttpSignalingClient(
-            client = this.client,
-            hubBaseUrl = setting.hubUrl,
-            rootToken = setting.authToken,
-            clientId = clientId,
-        )
-        signalingClient = signaling
+                if (recheck != null) {
+                    disconnectInternal()
+                }
 
-        val newWebrtc = WebRTCClient(context, signaling, scope)
-        val newTransport = DataChannelTransport(newWebrtc)
+                val clientId = setting.clientId.ifEmpty { "gogo-${UUID.randomUUID().toString().take(8)}" }
 
-        // Per-connection Job: cancel on disconnect so we don't leak a
-        // state collector that lives longer than the WebRTC client.
-        // Capture settingKey so Failed state stamps the right cooldown entry.
-        val stateJob = scope.launch {
-            newWebrtc.state.collect { state ->
-                _connectionState.value = state
-                when (state) {
-                    is P2PConnectionState.Failed -> {
-                        lastFailedAtBySetting[settingKey] = System.currentTimeMillis()
-                        connectedSetting = null
-                        modelsCache.remove(settingKey)
-                        Log.w(TAG, "P2P connection failed for $settingKey: ${state.reason}")
+                val signaling = HttpSignalingClient(
+                    client = this@SakerP2PProvider.client,
+                    hubBaseUrl = setting.hubUrl,
+                    rootToken = setting.authToken,
+                    clientId = clientId,
+                )
+                signalingClient = signaling
+
+                val newWebrtc = WebRTCClient(this@SakerP2PProvider.context, signaling, scope)
+                val newTransport = DataChannelTransport(newWebrtc)
+
+                val stateJob = scope.launch {
+                    newWebrtc.state.collect { state ->
+                        _connectionState.value = state
+                        when (state) {
+                            is P2PConnectionState.Failed -> {
+                                lastFailedAtBySetting[settingKey] = System.currentTimeMillis()
+                                connectedSetting = null
+                                modelsCache.remove(settingKey)
+                                Log.w(TAG, "P2P connection failed for $settingKey: ${state.reason}")
+                            }
+                            is P2PConnectionState.Disconnected -> {
+                                connectedSetting = null
+                                modelsCache.remove(settingKey)
+                                Log.i(TAG, "P2P disconnected for $settingKey")
+                            }
+                            else -> Unit
+                        }
                     }
-                    is P2PConnectionState.Disconnected -> {
-                        connectedSetting = null
-                        modelsCache.remove(settingKey)
-                        Log.i(TAG, "P2P disconnected for $settingKey")
-                    }
-                    else -> Unit
+                }
+                connectionJob = stateJob
+
+                try {
+                    val token = signaling.refreshJwt()
+                    newWebrtc.connect(setting.targetPeerId, clientId, iceServersFor(setting), token.jwt)
+                    webrtcClient = newWebrtc
+                    transport = newTransport
+                    connectedSetting = setting
+                    lastFailedAtBySetting.remove(settingKey)
+                    Log.i(TAG, "P2P connected to ${setting.targetPeerId} (setting=$settingKey)")
+                } catch (e: Exception) {
+                    Log.e(TAG, "ensureConnected failed for $settingKey; cleaning half-built state", e)
+                    stateJob.cancel()
+                    transport = null
+                    webrtcClient = null
+                    signalingClient = null
+                    connectedSetting = null
+                    lastFailedAtBySetting[settingKey] = System.currentTimeMillis()
+                    _connectionState.value = P2PConnectionState.Failed(e.message ?: "connect failed")
+                    throw e
                 }
             }
         }
-        connectionJob = stateJob
+    }
 
-        // webrtc.connect() can throw (signaling failure, ICE failure, etc).
-        // On any failure, tear down half-built state so the next call starts
-        // clean instead of reusing a dead transport.
-        try {
-            val token = signaling.refreshJwt()
-            newWebrtc.connect(setting.targetPeerId, clientId, iceServersFor(setting), token.jwt)
-            // Publish only after a successful connect so concurrent callers
-            // never see a half-initialized transport.
-            webrtcClient = newWebrtc
-            transport = newTransport
-            connectedSetting = setting
-            // Successful connect clears the per-setting failure marker so the
-            // next disconnect/reconnect cycle doesn't inherit a stale cooldown.
-            lastFailedAtBySetting.remove(settingKey)
-            Log.i(TAG, "P2P connected to ${setting.targetPeerId} (setting=$settingKey)")
-        } catch (e: Exception) {
-            Log.e(TAG, "ensureConnected failed for $settingKey; cleaning half-built state", e)
-            stateJob.cancel()
-            transport = null
+    /**
+     * Tear down the current connection synchronously. Returns immediately
+     * after marking the state Disconnected; the actual WebRTC resource
+     * cleanup runs on [scope] so the caller (typically a UI onClick) doesn't
+     * block on PeerConnection.close().
+     */
+    fun disconnect() {
+        _connectionState.value = P2PConnectionState.Disconnected
+        scope.launch { disconnectInternal() }
+    }
+
+    private suspend fun disconnectInternal() {
+        connectionMutex.withLock {
+            val settingKey = connectedSetting?.id?.toString()
+            connectionJob?.cancel()
+            connectionJob = null
+            webrtcClient?.disconnect()
             webrtcClient = null
+            transport = null
             signalingClient = null
             connectedSetting = null
-            lastFailedAtBySetting[settingKey] = System.currentTimeMillis()
-            _connectionState.value = P2PConnectionState.Failed(e.message ?: "connect failed")
-            throw e
+            if (settingKey != null) {
+                modelsCache.remove(settingKey)
+            } else {
+                modelsCache.clear()
+            }
         }
     }
 
-    fun disconnect() {
-        val settingKey = connectedSetting?.id?.toString()
-        connectionJob?.cancel()
+    override fun close() {
+        Log.i(TAG, "close() — releasing provider resources")
+        // Cancel outstanding coroutines first so ensureConnected can't keep
+        // running while we tear down state underneath it.
+        scope.cancel()
         connectionJob = null
         webrtcClient?.disconnect()
         webrtcClient = null
         transport = null
         signalingClient = null
         connectedSetting = null
-        // Clear only the current setting's cache entry; other settings' caches
-        // are independent and shouldn't be invalidated by switching connections.
-        if (settingKey != null) {
-            modelsCache.remove(settingKey)
-        } else {
-            modelsCache.clear()
-        }
-        // Keep lastFailedAtBySetting so the next ensureConnected respects
-        // the per-setting cooldown.
+        modelsCache.clear()
         _connectionState.value = P2PConnectionState.Disconnected
-    }
-
-    override fun close() {
-        Log.i(TAG, "close() — releasing provider resources")
-        disconnect()
-        scope.cancel()
     }
 }
