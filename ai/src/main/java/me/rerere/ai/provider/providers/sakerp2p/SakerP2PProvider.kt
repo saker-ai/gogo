@@ -40,7 +40,6 @@ import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.ImageGenerationItem
 import me.rerere.ai.ui.MessageChunk
 import me.rerere.ai.ui.UIMessage
-import me.rerere.ai.ui.UIMessageChoice
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.p2p.DataChannelTransport
 import me.rerere.p2p.HttpSignalingClient
