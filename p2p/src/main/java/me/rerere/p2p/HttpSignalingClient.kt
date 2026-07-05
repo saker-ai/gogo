@@ -1,4 +1,4 @@
-package me.rerere.rikkahub.data.p2p
+package me.rerere.p2p
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
@@ -160,7 +160,7 @@ class HttpSignalingClient(
                 channel.close()
             }
 
-            override fun onFailure(eventSource: EventSource, t: Throwable, response: Response?) {
+            override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                 channel.close(t)
             }
         })

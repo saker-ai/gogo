@@ -11,3 +11,7 @@ local.properties
 .cursor
 .history
 .kotlin
+
+# OMC tool state
+.omc/
+web-ui/.omc/

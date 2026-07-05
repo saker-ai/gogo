@@ -1,4 +1,4 @@
-package me.rerere.rikkahub.data.p2p
+package me.rerere.p2p
 
 /**
  * Connection state machine for the Saker P2P transport.

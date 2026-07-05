@@ -1,4 +1,4 @@
-package me.rerere.rikkahub.data.p2p
+package me.rerere.p2p
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable

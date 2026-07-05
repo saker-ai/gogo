@@ -36,6 +36,7 @@ rootProject.name = "rikkahub"
 include(":app")
 include(":highlight")
 include(":ai")
+include(":p2p")
 include(":search")
 include(":speech")
 include(":common")

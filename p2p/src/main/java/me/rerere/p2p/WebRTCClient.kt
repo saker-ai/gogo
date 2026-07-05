@@ -1,4 +1,4 @@
-package me.rerere.rikkahub.data.p2p
+package me.rerere.p2p
 
 import android.content.Context
 import android.util.Log
@@ -96,7 +96,7 @@ class WebRTCClient(
             val config = PeerConnection.RTCConfiguration(iceServers).apply {
                 sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
                 bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
-                iceTransportPolicy = PeerConnection.IceTransportsType.ALL
+                iceTransportsType = PeerConnection.IceTransportsType.ALL
             }
 
             peerConnection = factory.createPeerConnection(config, object : PeerConnection.Observer {

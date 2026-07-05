@@ -1,4 +1,4 @@
-package me.rerere.rikkahub.data.p2p
+package me.rerere.p2p
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -16,6 +16,23 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * One instance per active [WebRTCClient] connection. Thread-safe for the
  * in-flight request map.
+ *
+ * ## Wire format contract (peer-side)
+ *
+ * Saker nodes MUST send large payloads (base64 images, embedding vectors,
+ * long tool outputs) as `chunk` frames per §4.3, NOT as a single oversized
+ * `data` frame. WebRTC DataChannel has a ~16 KiB per-message ceiling on the
+ * default SCTP config; payloads larger than that would be silently truncated
+ * if sent as a single `data` frame.
+ *
+ * Frame format the peer must emit:
+ * - `data` frame: `{"type":"data","request_id":"...","payload":"<utf8 sse>"}` — small text deltas, tool call args, run_finished, etc.
+ * - `chunk` frame: `{"type":"chunk","request_id":"...","payload":"{\"seq\":0,\"fin\":false,\"data\":\"<base64-piece>\"}"}` — multi-frame, base64-encoded, last frame has `fin:true`. The transport base64-decodes and concatenates `data` across all chunks for the same `request_id` before emitting the reassembled UTF-8 payload.
+ * - `done` frame: `{"type":"done","request_id":"..."}` — stream terminator.
+ * - `error` frame: `{"type":"error","request_id":"...","code":500,"message":"..."}` — stream-level error; aborts the flow with [P2PException].
+ *
+ * Callers above this layer (e.g. [SakerP2PSseCodec]) only ever see the final
+ * UTF-8 SSE payload — chunked reassembly is transparent.
  */
 class DataChannelTransport(
     private val client: WebRTCClient,

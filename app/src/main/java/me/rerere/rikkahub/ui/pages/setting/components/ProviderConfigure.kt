@@ -6,6 +6,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -16,10 +19,14 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,8 +36,14 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.dokar.sonner.ToastType
+import kotlinx.coroutines.launch
 import me.rerere.ai.provider.ClaudePromptCacheTtl
+import me.rerere.ai.provider.ProviderManager
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.providers.sakerp2p.SakerP2PProvider
+import me.rerere.p2p.HttpSignalingClient
+import me.rerere.p2p.P2PConnectionState
+import me.rerere.p2p.PeerInfo
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.datastore.DEFAULT_PROVIDERS
 import me.rerere.hugeicons.HugeIcons
@@ -39,10 +52,13 @@ import me.rerere.hugeicons.stroke.ViewOff
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.theme.JetbrainsMono
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
+import org.koin.compose.koinInject
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.util.UUID
 import kotlin.reflect.KClass
 
 @Composable
@@ -75,6 +91,7 @@ fun ProviderConfigure(
             is ProviderSetting.OpenAI -> ProviderConfigureOpenAI(provider, onEdit)
             is ProviderSetting.Google -> ProviderConfigureGoogle(provider, onEdit)
             is ProviderSetting.Claude -> ProviderConfigureClaude(provider, onEdit)
+            is ProviderSetting.SakerP2P -> ProviderConfigureSakerP2P(provider, onEdit)
         }
     }
 }
@@ -86,16 +103,19 @@ fun ProviderSetting.convertTo(type: KClass<out ProviderSetting>): ProviderSettin
         is ProviderSetting.OpenAI -> this.apiKey
         is ProviderSetting.Google -> this.apiKey
         is ProviderSetting.Claude -> this.apiKey
+        is ProviderSetting.SakerP2P -> this.authToken
     }
     val sourceBaseUrl = when (this) {
         is ProviderSetting.OpenAI -> this.baseUrl
         is ProviderSetting.Google -> this.baseUrl
         is ProviderSetting.Claude -> this.baseUrl
+        is ProviderSetting.SakerP2P -> this.hubUrl
     }
     val targetDefaultBaseUrl = when (type) {
         ProviderSetting.OpenAI::class -> ProviderSetting.OpenAI().baseUrl
         ProviderSetting.Google::class -> ProviderSetting.Google().baseUrl
         ProviderSetting.Claude::class -> ProviderSetting.Claude().baseUrl
+        ProviderSetting.SakerP2P::class -> ProviderSetting.SakerP2P().hubUrl
         else -> error("Unsupported provider type: $type")
     }
     val convertedBaseUrl = sourceBaseUrl.convertToTargetBaseUrl(targetDefaultBaseUrl)
@@ -119,6 +139,12 @@ fun ProviderSetting.convertTo(type: KClass<out ProviderSetting>): ProviderSettin
             description = this.description, shortDescription = this.shortDescription,
             apiKey = apiKey, baseUrl = convertedBaseUrl
         )
+        ProviderSetting.SakerP2P::class -> ProviderSetting.SakerP2P(
+            id = this.id, enabled = this.enabled, name = this.name, models = this.models,
+            balanceOption = this.balanceOption, builtIn = this.builtIn,
+            description = this.description, shortDescription = this.shortDescription,
+            hubUrl = convertedBaseUrl, authToken = apiKey
+        )
         else -> error("Unsupported provider type: $type")
     }
 }
@@ -130,12 +156,14 @@ internal fun ProviderSetting.defaultBaseUrlForReset(): String {
             is ProviderSetting.OpenAI -> if (defaultProvider is ProviderSetting.OpenAI) return defaultProvider.baseUrl
             is ProviderSetting.Google -> if (defaultProvider is ProviderSetting.Google) return defaultProvider.baseUrl
             is ProviderSetting.Claude -> if (defaultProvider is ProviderSetting.Claude) return defaultProvider.baseUrl
+            is ProviderSetting.SakerP2P -> if (defaultProvider is ProviderSetting.SakerP2P) return defaultProvider.hubUrl
         }
     }
     return when (this) {
         is ProviderSetting.OpenAI -> ProviderSetting.OpenAI().baseUrl
         is ProviderSetting.Google -> ProviderSetting.Google().baseUrl
         is ProviderSetting.Claude -> ProviderSetting.Claude().baseUrl
+        is ProviderSetting.SakerP2P -> ProviderSetting.SakerP2P().hubUrl
     }
 }
 
@@ -145,6 +173,7 @@ internal fun ProviderSetting.resetBaseUrlToDefault(): ProviderSetting {
         is ProviderSetting.OpenAI -> this.copy(baseUrl = defaultBaseUrl)
         is ProviderSetting.Google -> this.copy(baseUrl = defaultBaseUrl)
         is ProviderSetting.Claude -> this.copy(baseUrl = defaultBaseUrl)
+        is ProviderSetting.SakerP2P -> this.copy(hubUrl = defaultBaseUrl)
     }
 }
 
@@ -153,6 +182,7 @@ internal fun ProviderSetting.isUsingDefaultBaseUrl(): Boolean {
         is ProviderSetting.OpenAI -> this.baseUrl
         is ProviderSetting.Google -> this.baseUrl
         is ProviderSetting.Claude -> this.baseUrl
+        is ProviderSetting.SakerP2P -> this.hubUrl
     }
     return baseUrl == defaultBaseUrlForReset()
 }
@@ -530,6 +560,195 @@ private fun ProviderConfigureGoogle(
             onValueChange = { onEdit(provider.copy(projectId = it.trim())) },
             label = { Text(stringResource(R.string.setting_provider_page_project_id)) },
             modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@Composable
+private fun ProviderConfigureSakerP2P(
+    provider: ProviderSetting.SakerP2P,
+    onEdit: (provider: ProviderSetting.SakerP2P) -> Unit
+) {
+    val toaster = LocalToaster.current
+    val scope = rememberCoroutineScope()
+    val httpClient = koinInject<OkHttpClient>()
+    val providerManager = koinInject<ProviderManager>()
+    val sakerP2PProvider = remember(providerManager) {
+        providerManager.getProvider("saker_p2p") as? SakerP2PProvider
+    }
+    val connectionState = sakerP2PProvider?.connectionState?.collectAsState()?.value
+    var peers by remember { mutableStateOf<List<PeerInfo>>(emptyList()) }
+    var showPeerDialog by remember { mutableStateOf(false) }
+    var loadingPeers by remember { mutableStateOf(false) }
+
+    // Persist a stable clientId so reconnects after disconnect use the same identity.
+    LaunchedEffect(provider.id, provider.clientId) {
+        if (provider.clientId.isBlank()) {
+            onEdit(provider.copy(clientId = "gogo-${UUID.randomUUID().toString().take(8)}"))
+        }
+    }
+
+    provider.description()
+
+    OutlinedTextField(
+        value = provider.name,
+        onValueChange = { onEdit(provider.copy(name = it.trim())) },
+        label = { Text(stringResource(R.string.setting_provider_page_name)) },
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    OutlinedTextField(
+        value = provider.hubUrl,
+        onValueChange = { onEdit(provider.copy(hubUrl = it.trim())) },
+        label = { Text("Hub URL") },
+        modifier = Modifier.fillMaxWidth(),
+        isError = provider.hubUrl.isNotBlank() && !provider.hubUrl.isValidBaseUrl(),
+    )
+
+    var tokenVisible by remember { mutableStateOf(false) }
+    OutlinedTextField(
+        value = provider.authToken,
+        onValueChange = { onEdit(provider.copy(authToken = it.trim())) },
+        label = { Text(stringResource(R.string.setting_provider_page_api_key)) },
+        modifier = Modifier.fillMaxWidth(),
+        maxLines = 3,
+        visualTransformation = if (tokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
+        trailingIcon = {
+            IconButton(onClick = { tokenVisible = !tokenVisible }) {
+                Icon(if (tokenVisible) HugeIcons.ViewOff else HugeIcons.View, contentDescription = null)
+            }
+        },
+    )
+
+    OutlinedTextField(
+        value = provider.targetPeerId,
+        onValueChange = { onEdit(provider.copy(targetPeerId = it.trim())) },
+        label = { Text("Target Peer ID") },
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    connectionState?.let { state ->
+        val (statusText, statusColor) = when (state) {
+            is P2PConnectionState.Connected -> "Connected" to MaterialTheme.colorScheme.primary
+            is P2PConnectionState.Connecting -> "Connecting..." to MaterialTheme.colorScheme.tertiary
+            is P2PConnectionState.Reconnecting -> "Reconnecting..." to MaterialTheme.colorScheme.tertiary
+            is P2PConnectionState.Disconnected -> "Disconnected" to MaterialTheme.colorScheme.outline
+            is P2PConnectionState.Failed -> "Failed: ${state.reason}" to MaterialTheme.colorScheme.error
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Connection: $statusText",
+                style = MaterialTheme.typography.bodySmall,
+                color = statusColor,
+            )
+            if (state is P2PConnectionState.Disconnected || state is P2PConnectionState.Failed) {
+                TextButton(
+                    onClick = { sakerP2PProvider.disconnect() },
+                ) {
+                    Text("Reset")
+                }
+            }
+        }
+    }
+
+    OutlinedButton(
+        onClick = {
+            scope.launch {
+                loadingPeers = true
+                try {
+                    val signaling = HttpSignalingClient(
+                        client = httpClient,
+                        hubBaseUrl = provider.hubUrl,
+                        rootToken = provider.authToken,
+                        clientId = provider.clientId,
+                    )
+                    peers = signaling.listPeers()
+                    if (peers.isEmpty()) {
+                        toaster.show("No peers online", type = ToastType.Warning)
+                    } else {
+                        showPeerDialog = true
+                    }
+                } catch (e: Exception) {
+                    toaster.show("Failed to list peers: ${e.message}", type = ToastType.Error)
+                }
+                loadingPeers = false
+            }
+        },
+        enabled = provider.hubUrl.isNotBlank() && provider.authToken.isNotBlank() && !loadingPeers,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        if (loadingPeers) {
+            CircularProgressIndicator(modifier = Modifier.padding(end = 8.dp))
+            Text("Loading peers...")
+        } else {
+            Text("Select Peer")
+        }
+    }
+
+    if (showPeerDialog) {
+        AlertDialog(
+            onDismissRequest = { showPeerDialog = false },
+            title = { Text("Select Peer") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    peers.forEach { peer ->
+                        TextButton(
+                            onClick = {
+                                onEdit(provider.copy(targetPeerId = peer.peerId))
+                                showPeerDialog = false
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    text = peer.peerId,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                if (peer.models.isNotEmpty()) {
+                                    Text(
+                                        text = peer.models.joinToString(", "),
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                if (peer.version.isNotEmpty()) {
+                                    Text(
+                                        text = "v${peer.version}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPeerDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    OutlinedTextField(
+        value = provider.clientId,
+        onValueChange = { onEdit(provider.copy(clientId = it.trim())) },
+        label = { Text("Client ID") },
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(stringResource(R.string.setting_provider_page_enable))
+        Switch(
+            checked = provider.enabled,
+            onCheckedChange = { onEdit(provider.copy(enabled = it)) }
         )
     }
 }

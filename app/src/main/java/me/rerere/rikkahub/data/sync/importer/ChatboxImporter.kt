@@ -570,6 +570,7 @@ object ChatboxImporter {
         is ProviderSetting.OpenAI -> "openai"
         is ProviderSetting.Google -> "gemini"
         is ProviderSetting.Claude -> "claude"
+        is ProviderSetting.SakerP2P -> "saker_p2p"
     }
 
     private fun millisToLocalDateTime(timestamp: Long?) =

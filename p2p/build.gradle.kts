@@ -3,24 +3,16 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.serialization)
-    alias(libs.plugins.kotlin.compose)
 }
 
 android {
-    namespace = "me.rerere.ai"
+    namespace = "me.rerere.p2p"
     compileSdk = 37
 
     defaultConfig {
         minSdk = 26
-
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
-//        externalNativeBuild {
-//            cmake {
-//                cppFlags += listOf("-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON")
-//                abiFilters += listOf("arm64-v8a", "x86_64")
-//            }
-//        }
     }
 
     buildTypes {
@@ -36,29 +28,13 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
-    buildFeatures {
-        compose = true
-    }
-//    externalNativeBuild {
-//        cmake {
-//            path = file("src/main/cpp/CMakeLists.txt")
-//            version = "3.22.1"
-//        }
-//    }
     tasks.withType<KotlinCompile>().configureEach {
-        compilerOptions.optIn.add("kotlin.uuid.ExperimentalUuidApi")
         compilerOptions.optIn.add("kotlin.time.ExperimentalTime")
     }
 }
 
 dependencies {
     implementation(project(":common"))
-    api(project(":p2p"))
-
-    // Compose
-    implementation(libs.androidx.core.ktx)
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.material3)
 
     // okhttp
     api(libs.okhttp)
@@ -68,7 +44,10 @@ dependencies {
     // kotlinx
     api(libs.kotlinx.serialization.json)
     api(libs.kotlinx.coroutines.core)
-    api(libs.kotlinx.datetime)
+
+    // WebRTC Android AAR (§3.3.1). Replace with the chosen trusted vendor
+    // build before release; the version is a placeholder for development.
+    api(libs.webrtc.android)
 
     // tests
     testImplementation(libs.junit)
