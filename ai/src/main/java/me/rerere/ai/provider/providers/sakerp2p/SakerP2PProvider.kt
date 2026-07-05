@@ -196,7 +196,7 @@ class SakerP2PProvider(
         val threadId = "mobile-thread-${UUID.randomUUID().toString().take(8)}"
         val body = SakerP2PSseCodec.buildAGUIRunRequest(messages, threadId, params.tools)
 
-        withTimeoutOrNull(STREAM_TIMEOUT_MS) {
+        val timedOut = withTimeoutOrNull(STREAM_TIMEOUT_MS) {
             transportMutex.withLock {
                 transport.chatStream(
                     body = body,
@@ -207,6 +207,9 @@ class SakerP2PProvider(
                     if (chunk != null) emit(chunk)
                 }
             }
+        } == null
+        if (timedOut) {
+            Log.w(TAG, "streamText timed out after ${STREAM_TIMEOUT_MS}ms (setting=${providerSetting.id}, threadId=$threadId)")
         }
     }
 
@@ -241,7 +244,7 @@ class SakerP2PProvider(
                     SakerP2PSseCodec.parseImageSSEPayload(ssePayload)?.let { emit(it) }
                 }
             }
-        }
+        } ?: Log.w(TAG, "generateImage timed out after ${STREAM_TIMEOUT_MS}ms (setting=${sakerSetting.id}, threadId=$threadId)")
     }
 
     override suspend fun editImage(
@@ -278,7 +281,7 @@ class SakerP2PProvider(
                     SakerP2PSseCodec.parseImageSSEPayload(ssePayload)?.let { emit(it) }
                 }
             }
-        }
+        } ?: Log.w(TAG, "editImage timed out after ${STREAM_TIMEOUT_MS}ms (setting=${sakerSetting.id}, threadId=$threadId)")
     }
 
     override suspend fun generateEmbedding(
@@ -301,7 +304,7 @@ class SakerP2PProvider(
         }
 
         var result: EmbeddingGenerationResult? = null
-        withTimeoutOrNull(STREAM_TIMEOUT_MS) {
+        val timedOut = withTimeoutOrNull(STREAM_TIMEOUT_MS) {
             transportMutex.withLock {
                 transport.chatStream(
                     body = body,
@@ -311,6 +314,9 @@ class SakerP2PProvider(
                     SakerP2PSseCodec.parseEmbeddingSSEPayload(ssePayload)?.let { result = it }
                 }
             }
+        } == null
+        if (timedOut) {
+            Log.w(TAG, "generateEmbedding timed out after ${STREAM_TIMEOUT_MS}ms (setting=${providerSetting.id}, threadId=$threadId, hasPartialResult=${result != null})")
         }
         return result ?: error("Failed to generate embedding via P2P")
     }
