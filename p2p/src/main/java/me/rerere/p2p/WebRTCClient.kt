@@ -141,6 +141,23 @@ class WebRTCClient(
             // Send Offer → Hub → Saker, receive Answer
             val response = signalingClient.sendOffer(targetPeerId, clientId, offer)
             sessionId = response.sessionId
+
+            // Merge Hub-returned ICE servers (e.g., TURN relays for symmetric NAT
+            // traversal) into the local config before applying remote description.
+            // setConfiguration before setRemoteDescription lets the new servers
+            // participate in ICE gathering for this connection.
+            if (response.iceServers.isNotEmpty()) {
+                val mergedIceServers = iceServers + response.iceServers.map { it.toIceServer() }
+                val mergedConfig = PeerConnection.RTCConfiguration(mergedIceServers).apply {
+                    sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+                    bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
+                    iceTransportsType = PeerConnection.IceTransportsType.ALL
+                }
+                if (peerConnection?.setConfiguration(mergedConfig) != true) {
+                    Log.w(TAG, "setConfiguration failed to apply Hub-returned ICE servers")
+                }
+            }
+
             peerConnection!!.awaitSetRemoteDescription(response.sdp.toWebrtc())
 
             // Listen for remote ICE candidates via SSE
@@ -291,4 +308,11 @@ fun parseIceCandidate(element: kotlinx.serialization.json.JsonElement): IceCandi
     val sdpMid = (obj["sdpMid"] as? JsonPrimitive)?.content ?: "0"
     val sdpMLineIndex = (obj["sdpMLineIndex"] as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
     return IceCandidate(sdpMid, sdpMLineIndex, sdp)
+}
+
+internal fun ICEServerConfig.toIceServer(): PeerConnection.IceServer {
+    val builder = PeerConnection.IceServer.builder(urls)
+    if (username != null) builder.setUsername(username)
+    if (credential != null) builder.setPassword(credential)
+    return builder.createIceServer()
 }
