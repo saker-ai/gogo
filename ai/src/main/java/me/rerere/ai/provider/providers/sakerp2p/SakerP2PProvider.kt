@@ -217,6 +217,17 @@ class SakerP2PProvider(
         } == null
         if (timedOut) {
             Log.w(TAG, "streamText timed out after ${STREAM_TIMEOUT_MS}ms (setting=${providerSetting.id}, threadId=$threadId)")
+            return@flow
+        }
+        // Stream completed within the timeout. chatStream's collect completes
+        // silently on both a clean `done` frame AND a torn-down connection
+        // (WebRTCClient.incoming SharedFlow completing). Surface the
+        // difference in logs so an interrupted stream is traceable.
+        when (val state = _connectionState.value) {
+            is P2PConnectionState.Disconnected, is P2PConnectionState.Failed -> {
+                Log.w(TAG, "streamText ended with connection state=$state (setting=${providerSetting.id}, threadId=$threadId); stream likely incomplete")
+            }
+            else -> Unit
         }
     }
 
@@ -241,7 +252,7 @@ class SakerP2PProvider(
             })
         }
 
-        withTimeoutOrNull(STREAM_TIMEOUT_MS) {
+        val timedOut = withTimeoutOrNull(STREAM_TIMEOUT_MS) {
             transportMutex.withLock {
                 transport.chatStream(
                     body = body,
@@ -251,7 +262,17 @@ class SakerP2PProvider(
                     SakerP2PSseCodec.parseImageSSEPayload(ssePayload)?.let { emit(it) }
                 }
             }
-        } ?: Log.w(TAG, "generateImage timed out after ${STREAM_TIMEOUT_MS}ms (setting=${sakerSetting.id}, threadId=$threadId)")
+        } == null
+        if (timedOut) {
+            Log.w(TAG, "generateImage timed out after ${STREAM_TIMEOUT_MS}ms (setting=${sakerSetting.id}, threadId=$threadId)")
+            return@flow
+        }
+        when (val state = _connectionState.value) {
+            is P2PConnectionState.Disconnected, is P2PConnectionState.Failed -> {
+                Log.w(TAG, "generateImage ended with connection state=$state (setting=${sakerSetting.id}, threadId=$threadId); stream likely incomplete")
+            }
+            else -> Unit
+        }
     }
 
     override suspend fun editImage(
@@ -278,7 +299,7 @@ class SakerP2PProvider(
             })
         }
 
-        withTimeoutOrNull(STREAM_TIMEOUT_MS) {
+        val timedOut = withTimeoutOrNull(STREAM_TIMEOUT_MS) {
             transportMutex.withLock {
                 transport.chatStream(
                     body = body,
@@ -288,7 +309,17 @@ class SakerP2PProvider(
                     SakerP2PSseCodec.parseImageSSEPayload(ssePayload)?.let { emit(it) }
                 }
             }
-        } ?: Log.w(TAG, "editImage timed out after ${STREAM_TIMEOUT_MS}ms (setting=${sakerSetting.id}, threadId=$threadId)")
+        } == null
+        if (timedOut) {
+            Log.w(TAG, "editImage timed out after ${STREAM_TIMEOUT_MS}ms (setting=${sakerSetting.id}, threadId=$threadId)")
+            return@flow
+        }
+        when (val state = _connectionState.value) {
+            is P2PConnectionState.Disconnected, is P2PConnectionState.Failed -> {
+                Log.w(TAG, "editImage ended with connection state=$state (setting=${sakerSetting.id}, threadId=$threadId); stream likely incomplete")
+            }
+            else -> Unit
+        }
     }
 
     override suspend fun generateEmbedding(
