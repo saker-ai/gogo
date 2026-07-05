@@ -151,6 +151,10 @@ class SakerP2PProvider(
         }
     }
 
+    // P2P channels don't carry a balance concept; return a stable placeholder
+    // so the UI doesn't render the inherited "TODO" default from Provider.
+    override suspend fun getBalance(providerSetting: ProviderSetting.SakerP2P): String = "N/A"
+
     override suspend fun generateText(
         providerSetting: ProviderSetting.SakerP2P,
         messages: List<UIMessage>,
