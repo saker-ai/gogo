@@ -238,6 +238,8 @@ class RikkaHubApp : Application() {
         super.onTerminate()
         get<AppScope>().cancel()
         stopService(Intent(this, WebServerService::class.java))
+        // Release P2P WebRTC resources and any other Closeable providers.
+        runCatching { get<me.rerere.ai.provider.ProviderManager>().close() }
     }
 }
 
