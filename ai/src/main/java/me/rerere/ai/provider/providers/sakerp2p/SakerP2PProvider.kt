@@ -418,6 +418,18 @@ class SakerP2PProvider(
                 try {
                     val token = signaling.refreshJwt()
                     newWebrtc.connect(setting.targetPeerId, clientId, iceServersFor(setting), token.jwt)
+                    // If disconnect() was called while we held the lock during
+                    // the handshake, _connectionState will already be
+                    // Disconnected. Bail out and tear down the half-built
+                    // connection so we don't clobber the Disconnected state
+                    // back to Connected via the state collector below.
+                    if (_connectionState.value is P2PConnectionState.Disconnected) {
+                        Log.i(TAG, "ensureConnected: disconnect requested during handshake for $settingKey, aborting")
+                        stateJob.cancel()
+                        newWebrtc.disconnect()
+                        signalingClient = null
+                        throw IllegalStateException("disconnect requested during handshake")
+                    }
                     webrtcClient = newWebrtc
                     transport = newTransport
                     connectedSetting = setting
@@ -430,8 +442,14 @@ class SakerP2PProvider(
                     webrtcClient = null
                     signalingClient = null
                     connectedSetting = null
-                    lastFailedAtBySetting[settingKey] = System.currentTimeMillis()
-                    _connectionState.value = P2PConnectionState.Failed(e.message ?: "connect failed")
+                    // Only stamp Failed if we aren't already Disconnected
+                    // (the disconnect() caller owns the Disconnected state).
+                    if (_connectionState.value !is P2PConnectionState.Disconnected) {
+                        lastFailedAtBySetting[settingKey] = System.currentTimeMillis()
+                        _connectionState.value = P2PConnectionState.Failed(e.message ?: "connect failed")
+                    } else {
+                        lastFailedAtBySetting[settingKey] = System.currentTimeMillis()
+                    }
                     throw e
                 }
             }
