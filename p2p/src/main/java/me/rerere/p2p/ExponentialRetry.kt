@@ -1,5 +1,6 @@
 package me.rerere.p2p
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlin.math.pow
 import kotlin.time.Duration
@@ -21,6 +22,8 @@ class ExponentialRetry(
         for (attempt in 0 until maxAttempts) {
             try {
                 return block(attempt)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Throwable) {
                 lastError = e
                 if (attempt + 1 >= maxAttempts) break
