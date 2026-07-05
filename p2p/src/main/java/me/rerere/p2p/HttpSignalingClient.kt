@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -178,13 +179,7 @@ class HttpSignalingClient(
         if (!resp.isSuccessful) {
             error("signal/peers failed: ${resp.code}")
         }
-        val body = resp.body!!.string()
-        val element = json.parseToJsonElement(body)
-        val arr = (element as? JsonObject)?.get("peers") ?: return@withContext emptyList()
-        json.decodeFromString(
-            kotlinx.serialization.builtins.ListSerializer(PeerInfo.serializer()),
-            arr.toString()
-        )
+        parsePeersResponseBody(json, resp.body!!.string())
     }
 
     private fun parseIso8601(s: String): Long? = try {
@@ -197,4 +192,26 @@ class HttpSignalingClient(
             null
         }
     }
+}
+
+/**
+ * Parse the body of GET /api/v1/signal/peers into a [PeerInfo] list.
+ * Extracted as a top-level internal function so it can be unit-tested
+ * without an OkHttpClient.
+ *
+ * Returns an empty list if the body is missing the `peers` field or the
+ * field isn't an array. Malformed JSON propagates as a serialization
+ * exception — the caller's [listPeers] wraps the request in a try/catch
+ * boundary.
+ */
+internal fun parsePeersResponseBody(
+    json: Json,
+    body: String,
+): List<PeerInfo> {
+    val element = json.parseToJsonElement(body)
+    val arr = (element as? JsonObject)?.get("peers") as? JsonArray ?: return emptyList()
+    return json.decodeFromString(
+        kotlinx.serialization.builtins.ListSerializer(PeerInfo.serializer()),
+        arr.toString(),
+    )
 }
