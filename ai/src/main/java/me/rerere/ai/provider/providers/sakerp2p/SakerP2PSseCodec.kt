@@ -45,10 +45,9 @@ internal object SakerP2PSseCodec {
         put("threadId", threadId)
         putJsonArray("messages") {
             for (m in messages) {
-                add(buildJsonObject {
-                    put("role", m.role.name.lowercase())
-                    put("content", m.contentText())
-                })
+                for (msg in m.toOpenAIMessages()) {
+                    add(msg)
+                }
             }
         }
         if (tools.isNotEmpty()) {
@@ -271,11 +270,92 @@ internal object SakerP2PSseCodec {
     )
 }
 
-private fun UIMessage.contentText(): String {
-    return parts.joinToString("") { part ->
+/**
+ * Convert a [UIMessage] into OpenAI-style message objects for the AG-UI wire
+ * format. A single UIMessage may expand into multiple messages when it carries
+ * tool results — the assistant message retains tool_calls and each result
+ * becomes a separate `tool` role message.
+ *
+ * - Text parts → concatenated into `content`
+ * - Reasoning parts → wrapped in `...` and prepended to `content`
+ * - Tool parts (with output) → `tool_calls` on the assistant message + a
+ *   `tool` role message carrying the textual result
+ * - Tool parts (no output) → `tool_calls` only
+ * - Image/Video/Audio/Document → omitted (P2P channel is text-only)
+ */
+private fun UIMessage.toOpenAIMessages(): List<JsonObject> {
+    val role = role.name.lowercase()
+    val textParts = StringBuilder()
+    val reasoningParts = StringBuilder()
+    val toolCalls = mutableListOf<JsonObject>()
+    val toolResults = mutableListOf<JsonObject>()
+
+    for (part in parts) {
         when (part) {
-            is UIMessagePart.Text -> part.text
-            else -> ""
+            is UIMessagePart.Text -> textParts.append(part.text)
+            is UIMessagePart.Reasoning -> reasoningParts.append(part.reasoning)
+            is UIMessagePart.Tool -> {
+                toolCalls.add(buildJsonObject {
+                    put("id", part.toolCallId)
+                    put("type", "function")
+                    put("function", buildJsonObject {
+                        put("name", part.toolName)
+                        put("arguments", part.input)
+                    })
+                })
+                if (part.output.isNotEmpty()) {
+                    val resultText = part.output.joinToString("") { o ->
+                        when (o) {
+                            is UIMessagePart.Text -> o.text
+                            else -> ""
+                        }
+                    }
+                    toolResults.add(buildJsonObject {
+                        put("role", "tool")
+                        put("tool_call_id", part.toolCallId)
+                        put("content", resultText)
+                    })
+                }
+            }
+            is UIMessagePart.ToolCall -> {
+                toolCalls.add(buildJsonObject {
+                    put("id", part.toolCallId)
+                    put("type", "function")
+                    put("function", buildJsonObject {
+                        put("name", part.toolName)
+                        put("arguments", part.arguments)
+                    })
+                })
+            }
+            is UIMessagePart.ToolResult -> {
+                toolResults.add(buildJsonObject {
+                    put("role", "tool")
+                    put("tool_call_id", part.toolCallId)
+                    put("content", part.content.toString())
+                })
+            }
+            else -> Unit
         }
     }
+
+    val content = buildString {
+        if (reasoningParts.isNotEmpty()) {
+            append("...")
+            append(reasoningParts.toString())
+            append("...")
+        }
+        append(textParts.toString())
+    }
+
+    val primaryMsg = buildJsonObject {
+        put("role", role)
+        put("content", content)
+        if (toolCalls.isNotEmpty()) {
+            putJsonArray("tool_calls") {
+                for (tc in toolCalls) add(tc)
+            }
+        }
+    }
+
+    return listOf(primaryMsg) + toolResults
 }

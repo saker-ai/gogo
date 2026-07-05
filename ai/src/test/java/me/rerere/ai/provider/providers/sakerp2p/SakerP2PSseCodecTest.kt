@@ -290,7 +290,7 @@ class SakerP2PSseCodecTest {
     }
 
     @Test
-    fun `run request content joins text parts only`() {
+    fun `run request content joins text parts and ignores non-text media`() {
         val messages = listOf(
             UIMessage(
                 role = MessageRole.USER,
@@ -304,6 +304,78 @@ class SakerP2PSseCodecTest {
         val body = SakerP2PSseCodec.buildAGUIRunRequest(messages, "t", emptyList())
         val content = body["messages"]?.jsonArray?.first()?.jsonObject?.get("content")?.jsonPrimitive?.content
         assertEquals("hello world", content)
+    }
+
+    @Test
+    fun `run request content wraps reasoning in think tags`() {
+        val messages = listOf(
+            UIMessage(
+                role = MessageRole.ASSISTANT,
+                parts = listOf(
+                    UIMessagePart.Reasoning(reasoning = "let me think"),
+                    UIMessagePart.Text("answer"),
+                )
+            )
+        )
+        val body = SakerP2PSseCodec.buildAGUIRunRequest(messages, "t", emptyList())
+        val content = body["messages"]?.jsonArray?.first()?.jsonObject?.get("content")?.jsonPrimitive?.content
+        assertEquals("...let me think...answer", content)
+    }
+
+    @Test
+    fun `run request emits tool_calls for pending tool invocation`() {
+        val messages = listOf(
+            UIMessage(
+                role = MessageRole.ASSISTANT,
+                parts = listOf(
+                    UIMessagePart.Text("calling tool"),
+                    UIMessagePart.Tool(
+                        toolCallId = "call_1",
+                        toolName = "search",
+                        input = "{\"q\":\"hi\"}",
+                    ),
+                )
+            )
+        )
+        val body = SakerP2PSseCodec.buildAGUIRunRequest(messages, "t", emptyList())
+        val messagesArr = body["messages"]?.jsonArray
+        assertEquals(1, messagesArr?.size)
+        val assistant = messagesArr?.first()?.jsonObject ?: error("assistant missing")
+        val toolCalls = assistant["tool_calls"]?.jsonArray ?: error("tool_calls missing")
+        assertEquals(1, toolCalls.size)
+        val tc = toolCalls.first().jsonObject
+        assertEquals("call_1", tc["id"]?.jsonPrimitive?.content)
+        assertEquals("function", tc["type"]?.jsonPrimitive?.content)
+        val fn = tc["function"]?.jsonObject ?: error("function missing")
+        assertEquals("search", fn["name"]?.jsonPrimitive?.content)
+        assertEquals("{\"q\":\"hi\"}", fn["arguments"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `run request splits executed tool into assistant and tool messages`() {
+        val messages = listOf(
+            UIMessage(
+                role = MessageRole.ASSISTANT,
+                parts = listOf(
+                    UIMessagePart.Tool(
+                        toolCallId = "call_2",
+                        toolName = "calc",
+                        input = "{}",
+                        output = listOf(UIMessagePart.Text("42")),
+                    ),
+                )
+            )
+        )
+        val body = SakerP2PSseCodec.buildAGUIRunRequest(messages, "t", emptyList())
+        val messagesArr = body["messages"]?.jsonArray
+        assertEquals(2, messagesArr?.size)
+        val assistant = messagesArr?.get(0)?.jsonObject ?: error("assistant missing")
+        val toolCalls = assistant["tool_calls"]?.jsonArray ?: error("tool_calls missing")
+        assertEquals(1, toolCalls.size)
+        val toolMsg = messagesArr.get(1).jsonObject
+        assertEquals("tool", toolMsg["role"]?.jsonPrimitive?.content)
+        assertEquals("call_2", toolMsg["tool_call_id"]?.jsonPrimitive?.content)
+        assertEquals("42", toolMsg["content"]?.jsonPrimitive?.content)
     }
 
     // ==================== collectStreamToMessageChunk ====================
