@@ -1,7 +1,9 @@
 package me.rerere.p2p
 
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -47,6 +49,13 @@ class DataChannelTransport(
         override fun fillInStackTrace(): Throwable = this
     }
 
+    // Thrown by the state monitor when the connection drops mid-stream so the
+    // incoming collect aborts immediately instead of hanging until the caller's
+    // withTimeoutOrNull fires.
+    private class StreamAborted(val state: P2PConnectionState) : RuntimeException() {
+        override fun fillInStackTrace(): Throwable = this
+    }
+
     /**
      * Send an AG-UI run request and stream back SSE event payloads.
      *
@@ -74,47 +83,70 @@ class DataChannelTransport(
         client.send(data)
 
         try {
-            client.incoming.collect { frame ->
-                // Route by request_id; skip auth/connection-level frames.
-                val frameReqId = frame.requestId
-                if (frameReqId != null && frameReqId != requestId) return@collect
+            // Wrap in coroutineScope so a state-monitor child coroutine can
+            // throw StreamAborted to cancel the incoming.collect sibling on
+            // connection drop. Without this, collect would hang on a dead
+            // SharedFlow (MutableSharedFlow never completes) until the
+            // caller's withTimeoutOrNull fires.
+            coroutineScope {
+                val stateMonitor = launch {
+                    client.state.collect { state ->
+                        if (state is P2PConnectionState.Disconnected ||
+                            state is P2PConnectionState.Failed
+                        ) {
+                            throw StreamAborted(state)
+                        }
+                    }
+                }
+                try {
+                    client.incoming.collect { frame ->
+                        // Route by request_id; skip auth/connection-level frames.
+                        val frameReqId = frame.requestId
+                        if (frameReqId != null && frameReqId != requestId) return@collect
 
-                when (frame.type) {
-                    "data" -> {
-                        emit(frame.payload ?: "")
-                    }
-                    "chunk" -> {
-                        val reqId = frame.requestId ?: return@collect
-                        val payloadStr = frame.payload ?: return@collect
-                        val chunk = try {
-                            json.decodeFromString(ChunkFrame.serializer(), payloadStr)
-                        } catch (e: Exception) {
-                            return@collect
-                        }
-                        val buf = chunkBuffers.computeIfAbsent(reqId) { StringBuilder() }
-                        buf.append(chunk.data)
-                        if (chunk.fin) {
-                            chunkBuffers.remove(reqId)
-                            val decoded = try {
-                                Base64.getDecoder().decode(buf.toString()).toString(Charsets.UTF_8)
-                            } catch (e: Exception) {
-                                return@collect
+                        when (frame.type) {
+                            "data" -> {
+                                emit(frame.payload ?: "")
                             }
-                            emit(decoded)
+                            "chunk" -> {
+                                val reqId = frame.requestId ?: return@collect
+                                val payloadStr = frame.payload ?: return@collect
+                                val chunk = try {
+                                    json.decodeFromString(ChunkFrame.serializer(), payloadStr)
+                                } catch (e: Exception) {
+                                    return@collect
+                                }
+                                val buf = chunkBuffers.computeIfAbsent(reqId) { StringBuilder() }
+                                buf.append(chunk.data)
+                                if (chunk.fin) {
+                                    chunkBuffers.remove(reqId)
+                                    val decoded = try {
+                                        Base64.getDecoder().decode(buf.toString()).toString(Charsets.UTF_8)
+                                    } catch (e: Exception) {
+                                        return@collect
+                                    }
+                                    emit(decoded)
+                                }
+                            }
+                            "done" -> {
+                                chunkBuffers.remove(requestId)
+                                throw StreamDone()
+                            }
+                            "error" -> {
+                                chunkBuffers.remove(requestId)
+                                throw P2PException(frame.code ?: 500, frame.message ?: "unknown error")
+                            }
                         }
                     }
-                    "done" -> {
-                        chunkBuffers.remove(requestId)
-                        throw StreamDone()
-                    }
-                    "error" -> {
-                        chunkBuffers.remove(requestId)
-                        throw P2PException(frame.code ?: 500, frame.message ?: "unknown error")
-                    }
+                } finally {
+                    stateMonitor.cancel()
                 }
             }
         } catch (e: StreamDone) {
             // Normal stream termination; flow completes.
+        } catch (e: StreamAborted) {
+            chunkBuffers.remove(requestId)
+            throw P2PException(503, "connection ${e.state} mid-stream")
         }
     }
 }
