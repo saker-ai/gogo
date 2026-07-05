@@ -116,17 +116,8 @@ class DataChannelTransport(
                                 } catch (e: Exception) {
                                     return@collect
                                 }
-                                val buf = chunkBuffers.computeIfAbsent(reqId) { StringBuilder() }
-                                buf.append(chunk.data)
-                                if (chunk.fin) {
-                                    chunkBuffers.remove(reqId)
-                                    val decoded = try {
-                                        Base64.getDecoder().decode(buf.toString()).toString(Charsets.UTF_8)
-                                    } catch (e: Exception) {
-                                        return@collect
-                                    }
-                                    emit(decoded)
-                                }
+                                val decoded = reassembleChunk(chunkBuffers, reqId, chunk)
+                                if (decoded != null) emit(decoded)
                             }
                             "done" -> {
                                 chunkBuffers.remove(requestId)
@@ -148,5 +139,32 @@ class DataChannelTransport(
             chunkBuffers.remove(requestId)
             throw P2PException(503, "connection ${e.state} mid-stream")
         }
+    }
+}
+
+/**
+ * Accumulate a [ChunkFrame] into the per-request buffer and, if `fin` is set,
+ * base64-decode the concatenated payload to a UTF-8 string.
+ *
+ * Returns null while accumulating (more chunks expected), or the decoded
+ * payload on the final chunk. Returns null on the final chunk if base64
+ * decoding fails — the caller silently drops the malformed sequence.
+ *
+ * Extracted as a top-level internal function so the reassembly logic can
+ * be unit-tested without a live WebRTC transport.
+ */
+internal fun reassembleChunk(
+    buffers: ConcurrentHashMap<String, StringBuilder>,
+    requestId: String,
+    chunk: ChunkFrame,
+): String? {
+    val buf = buffers.computeIfAbsent(requestId) { StringBuilder() }
+    buf.append(chunk.data)
+    if (!chunk.fin) return null
+    buffers.remove(requestId)
+    return try {
+        Base64.getDecoder().decode(buf.toString()).toString(Charsets.UTF_8)
+    } catch (e: Exception) {
+        null
     }
 }
