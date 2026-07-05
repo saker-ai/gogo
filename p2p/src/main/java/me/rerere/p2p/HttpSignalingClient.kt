@@ -1,5 +1,6 @@
 package me.rerere.p2p
 
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -25,6 +26,8 @@ import org.webrtc.IceCandidate
 import org.webrtc.SessionDescription
 import java.time.Instant
 import java.time.format.DateTimeParseException
+
+private const val TAG = "HttpSignalingClient"
 
 /**
  * HTTP + SSE implementation of [SignalingClient] (§4.2 of the design doc).
@@ -148,6 +151,7 @@ class HttpSignalingClient(
                         val element = try {
                             json.parseToJsonElement(data)
                         } catch (e: Exception) {
+                            Log.w(TAG, "onEvent: failed to parse ice payload, dropping", e)
                             return
                         }
                         trySend(SignalEvent.Ice(element))
