@@ -162,10 +162,15 @@ class WebRTCClient(
     }
 
     fun send(data: ByteArray) {
-        val dc = dataChannel ?: return
+        val dc = dataChannel
+        if (dc == null) {
+            Log.w(TAG, "send: dataChannel is null (${data.size} bytes dropped); not connected?")
+            return
+        }
         // Backpressure: drop if bufferedAmount exceeds 512 KiB (§7.3)
         if (dc.bufferedAmount() > 512 * 1024L) {
             droppedFrames.increment()
+            Log.w(TAG, "send: dropping ${data.size} bytes, bufferedAmount=${dc.bufferedAmount()} > 512KiB threshold")
             return
         }
         dc.send(DataChannel.Buffer(ByteBuffer.wrap(data), false))
