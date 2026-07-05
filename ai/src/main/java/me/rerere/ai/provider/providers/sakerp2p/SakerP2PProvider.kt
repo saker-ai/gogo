@@ -113,9 +113,11 @@ class SakerP2PProvider(
     }
 
     private fun iceServersFor(setting: ProviderSetting.SakerP2P): List<PeerConnection.IceServer> {
-        return iceServersBySetting[setting.id.toString()] ?: listOf(
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-        )
+        // Fall back to a multi-vendor STUN list so the client can still gather
+        // a server-reflexive candidate if one provider is unreachable (e.g.
+        // Google STUN behind the GFW). Callers should push Hub-provided or
+        // TURN servers via [updateIceServers] for production use.
+        return iceServersBySetting[setting.id.toString()] ?: DEFAULT_STUN_SERVERS
     }
 
     private val _connectionState = MutableStateFlow<P2PConnectionState?>(null)
@@ -130,6 +132,16 @@ class SakerP2PProvider(
         // + ICE gathering). If this slips past, abort so the caller doesn't
         // hang indefinitely and the connectionMutex is released.
         private const val CONNECT_TIMEOUT_MS = 30_000L
+
+        // Multi-vendor STUN list so ICE can still gather a server-reflexive
+        // candidate if one provider is unreachable. WebRTC's RTCConfiguration
+        // accepts multiple servers and tries them in order — this is the
+        // standard pattern, not an ad-hoc fallback. Production deployments
+        // should push Hub-provided or TURN servers via [updateIceServers].
+        private val DEFAULT_STUN_SERVERS = listOf(
+            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+            PeerConnection.IceServer.builder("stun:stun.stunprotocol.org:3478").createIceServer(),
+        )
     }
 
     override suspend fun listModels(providerSetting: ProviderSetting.SakerP2P): List<Model> {
