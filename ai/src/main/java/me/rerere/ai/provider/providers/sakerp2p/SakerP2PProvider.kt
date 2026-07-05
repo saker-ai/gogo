@@ -199,6 +199,13 @@ class SakerP2PProvider(
         params: TextGenerationParams,
     ): Flow<MessageChunk> = flow {
         ensureConnected(providerSetting)
+        // Capture transport as a local val so the chatStream caller and the
+        // collect body see the same DataChannelTransport instance even if a
+        // concurrent disconnect/reconnect swaps the field mid-stream. If the
+        // connection IS torn down while we hold this val, the state monitor
+        // inside DataChannelTransport.chatStream throws P2PException(503)
+        // (see DataChannelTransport.kt) — so the caller sees the drop
+        // immediately instead of silently using a stale transport.
         val transport = transport ?: error("P2P transport not initialized")
 
         val threadId = "mobile-thread-${UUID.randomUUID().toString().take(8)}"
