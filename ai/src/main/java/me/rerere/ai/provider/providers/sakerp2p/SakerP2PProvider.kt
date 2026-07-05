@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -405,7 +406,7 @@ class SakerP2PProvider(
                 if (lastFail > 0L && sinceFail < RECONNECT_COOLDOWN_MS) {
                     val wait = RECONNECT_COOLDOWN_MS - sinceFail
                     Log.i(TAG, "Reconnect cooldown active for $settingKey, waiting ${wait}ms")
-                    kotlinx.coroutines.delay(wait)
+                    delay(wait)
                 }
 
                 if (recheck != null) {
