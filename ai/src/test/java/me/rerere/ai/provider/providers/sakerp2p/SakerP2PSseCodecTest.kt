@@ -1,5 +1,7 @@
 package me.rerere.ai.provider.providers.sakerp2p
 
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -13,7 +15,9 @@ import kotlinx.serialization.json.putJsonArray
 import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.Tool
+import me.rerere.ai.ui.MessageChunk
 import me.rerere.ai.ui.UIMessage
+import me.rerere.ai.ui.UIMessageChoice
 import me.rerere.ai.ui.UIMessagePart
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -300,5 +304,147 @@ class SakerP2PSseCodecTest {
         val body = SakerP2PSseCodec.buildAGUIRunRequest(messages, "t", emptyList())
         val content = body["messages"]?.jsonArray?.first()?.jsonObject?.get("content")?.jsonPrimitive?.content
         assertEquals("hello world", content)
+    }
+
+    // ==================== collectStreamToMessageChunk ====================
+
+    private fun chunk(
+        parts: List<UIMessagePart> = emptyList(),
+        finishReason: String? = null,
+    ) = MessageChunk(
+        id = "test",
+        model = "",
+        choices = listOf(
+            UIMessageChoice(
+                index = 0,
+                delta = if (parts.isEmpty() && finishReason == null) null
+                    else UIMessage(role = MessageRole.ASSISTANT, parts = parts),
+                message = null,
+                finishReason = finishReason,
+            )
+        ),
+        usage = null,
+    )
+
+    @Test
+    fun `collect merges text deltas into ordered parts`() = runBlocking {
+        val stream = flowOf(
+            chunk(parts = listOf(UIMessagePart.Text("Hello"))),
+            chunk(parts = listOf(UIMessagePart.Text(" world"))),
+        )
+
+        val result = SakerP2PSseCodec.collectStreamToMessageChunk(stream, "test-model")
+
+        assertEquals("test-model", result.model)
+        assertTrue(result.id.startsWith("p2p-"))
+        val choice = result.choices.first()
+        assertNull(choice.delta)
+        assertEquals(MessageRole.ASSISTANT, choice.message?.role)
+        assertEquals(2, choice.message?.parts?.size)
+        assertEquals("Hello", (choice.message?.parts?.get(0) as? UIMessagePart.Text)?.text)
+        assertEquals(" world", (choice.message?.parts?.get(1) as? UIMessagePart.Text)?.text)
+        assertEquals("stop", choice.finishReason)
+    }
+
+    @Test
+    fun `collect preserves reasoning and text ordering`() = runBlocking {
+        val stream = flowOf(
+            chunk(parts = listOf(UIMessagePart.Reasoning(reasoning = "thinking"))),
+            chunk(parts = listOf(UIMessagePart.Text("answer"))),
+        )
+
+        val result = SakerP2PSseCodec.collectStreamToMessageChunk(stream, "m")
+
+        val parts = result.choices.first().message?.parts
+        assertEquals(2, parts?.size)
+        assertTrue(parts?.get(0) is UIMessagePart.Reasoning)
+        assertTrue(parts?.get(1) is UIMessagePart.Text)
+    }
+
+    @Test
+    fun `collect merges tool call start and args as separate parts`() = runBlocking {
+        val stream = flowOf(
+            chunk(parts = listOf(UIMessagePart.Tool(toolCallId = "call_1", toolName = "search", input = ""))),
+            chunk(parts = listOf(UIMessagePart.Tool(toolCallId = "call_1", toolName = "", input = "{\"q\":\"hi\"}"))),
+        )
+
+        val result = SakerP2PSseCodec.collectStreamToMessageChunk(stream, "m")
+
+        val parts = result.choices.first().message?.parts
+        assertEquals(2, parts?.size)
+        val first = parts?.get(0) as? UIMessagePart.Tool
+        val second = parts?.get(1) as? UIMessagePart.Tool
+        assertEquals("call_1", first?.toolCallId)
+        assertEquals("search", first?.toolName)
+        assertEquals("", first?.input)
+        assertEquals("call_1", second?.toolCallId)
+        assertEquals("{\"q\":\"hi\"}", second?.input)
+    }
+
+    @Test
+    fun `collect carries finish reason from run finished chunk`() = runBlocking {
+        val stream = flowOf(
+            chunk(parts = listOf(UIMessagePart.Text("done"))),
+            chunk(finishReason = "stop"),
+        )
+
+        val result = SakerP2PSseCodec.collectStreamToMessageChunk(stream, "m")
+
+        val choice = result.choices.first()
+        assertEquals(1, choice.message?.parts?.size)
+        assertNull(choice.delta)
+        assertEquals("stop", choice.finishReason)
+    }
+
+    @Test
+    fun `collect defaults finish reason to stop when stream has none`() = runBlocking {
+        val stream = flowOf(
+            chunk(parts = listOf(UIMessagePart.Text("no finish"))),
+        )
+
+        val result = SakerP2PSseCodec.collectStreamToMessageChunk(stream, "m")
+
+        assertEquals("stop", result.choices.first().finishReason)
+    }
+
+    @Test
+    fun `collect on empty stream yields empty parts with stop reason`() = runBlocking {
+        val result = SakerP2PSseCodec.collectStreamToMessageChunk(flowOf(), "m")
+
+        val choice = result.choices.first()
+        assertTrue(choice.message?.parts.isNullOrEmpty())
+        assertEquals("stop", choice.finishReason)
+    }
+
+    @Test
+    fun `collect skips chunks without choices`() = runBlocking {
+        val emptyChoiceChunk = MessageChunk(
+            id = "test",
+            model = "",
+            choices = emptyList(),
+            usage = null,
+        )
+        val stream = flowOf(
+            emptyChoiceChunk,
+            chunk(parts = listOf(UIMessagePart.Text("after empty"))),
+        )
+
+        val result = SakerP2PSseCodec.collectStreamToMessageChunk(stream, "m")
+
+        val parts = result.choices.first().message?.parts
+        assertEquals(1, parts?.size)
+        assertEquals("after empty", (parts?.get(0) as? UIMessagePart.Text)?.text)
+    }
+
+    @Test
+    fun `collect takes last non-null finish reason`() = runBlocking {
+        val stream = flowOf(
+            chunk(parts = listOf(UIMessagePart.Text("a")), finishReason = "length"),
+            chunk(finishReason = "stop"),
+        )
+
+        val result = SakerP2PSseCodec.collectStreamToMessageChunk(stream, "m")
+
+        assertEquals("stop", result.choices.first().finishReason)
     }
 }

@@ -1,5 +1,6 @@
 package me.rerere.ai.provider.providers.sakerp2p
 
+import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -23,6 +24,7 @@ import me.rerere.ai.ui.MessageChunk
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageChoice
 import me.rerere.ai.ui.UIMessagePart
+import java.util.UUID
 
 /**
  * Pure codec for the Saker P2P AG-UI wire format. Extracted from
@@ -133,6 +135,45 @@ internal object SakerP2PSseCodec {
         } catch (e: Exception) {
             null
         }
+    }
+
+    /**
+     * Aggregate a stream of [MessageChunk]s into a single non-streaming
+     * [MessageChunk] for callers of `generateText`. Preserves every part
+     * emitted across the stream (text + reasoning + tool calls) in order,
+     * and carries forward the last non-null finishReason (defaulting to
+     * "stop" if the stream completed without one).
+     *
+     * Extracted as a pure function so the merge logic can be unit-tested
+     * without a live WebRTC transport.
+     */
+    suspend fun collectStreamToMessageChunk(
+        stream: Flow<MessageChunk>,
+        modelId: String,
+    ): MessageChunk {
+        val parts = mutableListOf<UIMessagePart>()
+        var finishReason: String? = null
+        stream.collect { chunk ->
+            val choice = chunk.choices.firstOrNull() ?: return@collect
+            choice.delta?.parts?.let { parts.addAll(it) }
+            choice.finishReason?.let { finishReason = it }
+        }
+        return MessageChunk(
+            id = "p2p-${UUID.randomUUID().toString().take(8)}",
+            model = modelId,
+            choices = listOf(
+                UIMessageChoice(
+                    index = 0,
+                    delta = null,
+                    message = UIMessage(
+                        role = MessageRole.ASSISTANT,
+                        parts = parts,
+                    ),
+                    finishReason = finishReason ?: "stop",
+                )
+            ),
+            usage = null,
+        )
     }
 
     private fun textChunk(text: String): MessageChunk = MessageChunk(

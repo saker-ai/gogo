@@ -177,31 +177,12 @@ class SakerP2PProvider(
         messages: List<UIMessage>,
         params: TextGenerationParams,
     ): MessageChunk {
-        // Collect the stream preserving all part types (text + reasoning +
-        // tool calls) so non-streaming callers see the full response, not
-        // just text.
-        val parts = mutableListOf<UIMessagePart>()
-        var finishReason: String? = null
-        streamText(providerSetting, messages, params).collect { chunk ->
-            val choice = chunk.choices.firstOrNull() ?: return@collect
-            choice.delta?.parts?.let { parts.addAll(it) }
-            choice.finishReason?.let { finishReason = it }
-        }
-        return MessageChunk(
-            id = "p2p-${UUID.randomUUID().toString().take(8)}",
-            model = params.model.modelId,
-            choices = listOf(
-                UIMessageChoice(
-                    index = 0,
-                    delta = null,
-                    message = UIMessage(
-                        role = MessageRole.ASSISTANT,
-                        parts = parts,
-                    ),
-                    finishReason = finishReason ?: "stop",
-                )
-            ),
-            usage = null,
+        // Delegate to the pure merge function in the codec so the aggregation
+        // logic (parts accumulation + finishReason carry-forward) is testable
+        // without a live WebRTC transport.
+        return SakerP2PSseCodec.collectStreamToMessageChunk(
+            stream = streamText(providerSetting, messages, params),
+            modelId = params.model.modelId,
         )
     }
 
