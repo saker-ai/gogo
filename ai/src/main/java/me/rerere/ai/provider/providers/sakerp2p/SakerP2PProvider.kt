@@ -85,24 +85,32 @@ class SakerP2PProvider(
     private data class ModelsCacheEntry(val models: List<Model>, val timestamp: Long)
     private val modelsCache = ConcurrentHashMap<String, ModelsCacheEntry>()
 
-    // Reconnect cooldown: after a Failed state, refuse immediate reconnect so
-    // a down peer doesn't trigger a request-fail-reconnect tight loop.
-    @Volatile private var lastFailedAt: Long = 0L
+    // Per-setting reconnect cooldown: after a Failed state, refuse immediate
+    // reconnect so a down peer doesn't trigger a request-fail-reconnect tight
+    // loop. Keyed by setting.id so failure on peer A doesn't cooldown peer B.
+    private val lastFailedAtBySetting = ConcurrentHashMap<String, Long>()
 
-    // ICE servers: start with Google STUN as a baseline. Upper layers can push
-    // a Hub-provided or remote-config list via [updateIceServers]; the Hub
-    // also returns iceServers in SignalResponse, but WebRTCClient needs the
-    // list before createOffer — so we serve from cache here.
-    @Volatile
-    private var cachedIceServers: List<PeerConnection.IceServer> = listOf(
-        PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-    )
+    // Per-setting ICE servers: start with Google STUN as a baseline. Upper
+    // layers can push a Hub-provided or remote-config list via
+    // [updateIceServers]; the Hub also returns iceServers in SignalResponse,
+    // but WebRTCClient needs the list before createOffer — so we serve from
+    // cache here. Keyed by setting.id so different Hubs don't cross-pollute.
+    private val iceServersBySetting = ConcurrentHashMap<String, List<PeerConnection.IceServer>>()
 
-    fun updateIceServers(servers: List<PeerConnection.IceServer>) {
+    fun updateIceServers(
+        settingId: Uuid,
+        servers: List<PeerConnection.IceServer>,
+    ) {
         if (servers.isNotEmpty()) {
-            cachedIceServers = servers
-            Log.i(TAG, "ICE servers updated: ${servers.size} entries")
+            iceServersBySetting[settingId.toString()] = servers
+            Log.i(TAG, "ICE servers updated for $settingId: ${servers.size} entries")
         }
+    }
+
+    private fun iceServersFor(setting: ProviderSetting.SakerP2P): List<PeerConnection.IceServer> {
+        return iceServersBySetting[setting.id.toString()] ?: listOf(
+            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+        )
     }
 
     private val _connectionState = MutableStateFlow<P2PConnectionState?>(null)
@@ -319,14 +327,17 @@ class SakerP2PProvider(
     }
 
     private suspend fun ensureConnected(setting: ProviderSetting.SakerP2P) {
-        // Reconnect cooldown: if the last attempt Failed recently, wait out
-        // the cooldown before re-attempting. This avoids a hot loop when the
-        // peer is unreachable.
+        val settingKey = setting.id.toString()
+
+        // Reconnect cooldown: if the last attempt for THIS setting Failed
+        // recently, wait out the cooldown before re-attempting. Keyed by
+        // setting.id so failure on peer A doesn't delay peer B.
         val nowMs = System.currentTimeMillis()
-        val sinceFail = nowMs - lastFailedAt
-        if (lastFailedAt > 0L && sinceFail < RECONNECT_COOLDOWN_MS) {
+        val lastFail = lastFailedAtBySetting[settingKey] ?: 0L
+        val sinceFail = nowMs - lastFail
+        if (lastFail > 0L && sinceFail < RECONNECT_COOLDOWN_MS) {
             val wait = RECONNECT_COOLDOWN_MS - sinceFail
-            Log.i(TAG, "Reconnect cooldown active, waiting ${wait}ms")
+            Log.i(TAG, "Reconnect cooldown active for $settingKey, waiting ${wait}ms")
             kotlinx.coroutines.delay(wait)
         }
 
@@ -362,20 +373,21 @@ class SakerP2PProvider(
 
         // Per-connection Job: cancel on disconnect so we don't leak a
         // state collector that lives longer than the WebRTC client.
+        // Capture settingKey so Failed state stamps the right cooldown entry.
         val stateJob = scope.launch {
             newWebrtc.state.collect { state ->
                 _connectionState.value = state
                 when (state) {
                     is P2PConnectionState.Failed -> {
-                        lastFailedAt = System.currentTimeMillis()
+                        lastFailedAtBySetting[settingKey] = System.currentTimeMillis()
                         connectedSetting = null
-                        modelsCache.clear()
-                        Log.w(TAG, "P2P connection failed: ${state.reason}")
+                        modelsCache.remove(settingKey)
+                        Log.w(TAG, "P2P connection failed for $settingKey: ${state.reason}")
                     }
                     is P2PConnectionState.Disconnected -> {
                         connectedSetting = null
-                        modelsCache.clear()
-                        Log.i(TAG, "P2P disconnected")
+                        modelsCache.remove(settingKey)
+                        Log.i(TAG, "P2P disconnected for $settingKey")
                     }
                     else -> Unit
                 }
@@ -388,27 +400,31 @@ class SakerP2PProvider(
         // clean instead of reusing a dead transport.
         try {
             val token = signaling.refreshJwt()
-            newWebrtc.connect(setting.targetPeerId, clientId, cachedIceServers, token.jwt)
+            newWebrtc.connect(setting.targetPeerId, clientId, iceServersFor(setting), token.jwt)
             // Publish only after a successful connect so concurrent callers
             // never see a half-initialized transport.
             webrtcClient = newWebrtc
             transport = newTransport
             connectedSetting = setting
-            Log.i(TAG, "P2P connected to ${setting.targetPeerId}")
+            // Successful connect clears the per-setting failure marker so the
+            // next disconnect/reconnect cycle doesn't inherit a stale cooldown.
+            lastFailedAtBySetting.remove(settingKey)
+            Log.i(TAG, "P2P connected to ${setting.targetPeerId} (setting=$settingKey)")
         } catch (e: Exception) {
-            Log.e(TAG, "ensureConnected failed; cleaning half-built state", e)
+            Log.e(TAG, "ensureConnected failed for $settingKey; cleaning half-built state", e)
             stateJob.cancel()
             transport = null
             webrtcClient = null
             signalingClient = null
             connectedSetting = null
-            lastFailedAt = System.currentTimeMillis()
+            lastFailedAtBySetting[settingKey] = System.currentTimeMillis()
             _connectionState.value = P2PConnectionState.Failed(e.message ?: "connect failed")
             throw e
         }
     }
 
     fun disconnect() {
+        val settingKey = connectedSetting?.id?.toString()
         connectionJob?.cancel()
         connectionJob = null
         webrtcClient?.disconnect()
@@ -416,8 +432,15 @@ class SakerP2PProvider(
         transport = null
         signalingClient = null
         connectedSetting = null
-        modelsCache.clear()
-        // Keep lastFailedAt so the next ensureConnected respects the cooldown.
+        // Clear only the current setting's cache entry; other settings' caches
+        // are independent and shouldn't be invalidated by switching connections.
+        if (settingKey != null) {
+            modelsCache.remove(settingKey)
+        } else {
+            modelsCache.clear()
+        }
+        // Keep lastFailedAtBySetting so the next ensureConnected respects
+        // the per-setting cooldown.
         _connectionState.value = P2PConnectionState.Disconnected
     }
 
