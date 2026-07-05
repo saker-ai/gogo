@@ -24,7 +24,7 @@ import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import org.webrtc.IceCandidate
 import org.webrtc.SessionDescription
-import java.time.Instant
+import java.time.OffsetDateTime
 import java.time.format.DateTimeParseException
 
 private const val TAG = "HttpSignalingClient"
@@ -187,14 +187,11 @@ class HttpSignalingClient(
     }
 
     private fun parseIso8601(s: String): Long? = try {
-        // Accept both Instant format (with 'Z') and offset formats.
-        Instant.parse(s).toEpochMilli()
+        // OffsetDateTime.parse accepts both 'Z' (UTC) and '+08:00' (offset)
+        // formats, so a single try covers both. Returns null if neither matches.
+        OffsetDateTime.parse(s).toInstant().toEpochMilli()
     } catch (e: DateTimeParseException) {
-        try {
-            java.time.OffsetDateTime.parse(s).toInstant().toEpochMilli()
-        } catch (e2: DateTimeParseException) {
-            null
-        }
+        null
     }
 }
 
