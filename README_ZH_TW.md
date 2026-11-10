@@ -1,3 +1,5 @@
+> **儲存庫身分：** saker-ai/gogo 是 RikkaHub 的 fork。下文保留上游品牌、授權和下載連結；上游下載不代表此 fork 的發行版本。此原始碼另含 web/web-ui 與 workspace 模組。建置要求見 [AGENTS.md](AGENTS.md)：Android 需要 app/google-services.json，web 建置需要 zsh、pnpm 及前端依賴。
+
 <div align="center">
   <img src="docs/icon.png" alt="App 圖標" width="100" />
   <h1>RikkaHub</h1>
