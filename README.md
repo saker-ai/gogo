@@ -1,3 +1,13 @@
+> **Repository identity:** `saker-ai/gogo` is a fork of RikkaHub.
+> The upstream project branding, license and download links below are retained;
+> those downloads are not releases of this fork. This tree also includes
+> `web/` + `web-ui/` and the `workspace/` module.
+>
+> For source builds, follow [AGENTS.md](AGENTS.md). The Android build needs
+> `app/google-services.json`; `web/preBuild` runs the web UI build through
+> `zsh -ic "pnpm run build"`, so zsh, pnpm and frontend dependencies must be
+> available. Do not infer a signed Android release from a successful web build.
+
 <div align="center">
   <img src="docs/icon.png" alt="App Icon" width="100" />
   <h1>RikkaHub</h1>
